@@ -209,10 +209,11 @@ class FilterConfigPanel(QWidget):
 
         # Low/Single cutoff
         self.cutoff_low_spin = QDoubleSpinBox()
-        self.cutoff_low_spin.setRange(1.0, 25000.0)
+        self.cutoff_low_spin.setRange(0.001, 25000.0)
+        self.cutoff_low_spin.setDecimals(3)
         self.cutoff_low_spin.setValue(ProcessingDefaults.DEFAULT_LOWPASS_CUTOFF)
         self.cutoff_low_spin.setSuffix(" Hz")
-        self.cutoff_low_spin.setSingleStep(10.0)
+        self.cutoff_low_spin.setSingleStep(0.001)
         self.cutoff_low_spin.valueChanged.connect(self._on_parameter_changed)
 
         self.cutoff_low_label = QLabel("Cutoff:")
@@ -220,10 +221,11 @@ class FilterConfigPanel(QWidget):
 
         # High cutoff (for bandpass/bandstop)
         self.cutoff_high_spin = QDoubleSpinBox()
-        self.cutoff_high_spin.setRange(1.0, 25000.0)
+        self.cutoff_high_spin.setRange(0.001, 25000.0)
+        self.cutoff_high_spin.setDecimals(3)
         self.cutoff_high_spin.setValue(5000.0)
         self.cutoff_high_spin.setSuffix(" Hz")
-        self.cutoff_high_spin.setSingleStep(10.0)
+        self.cutoff_high_spin.setSingleStep(0.001)
         self.cutoff_high_spin.valueChanged.connect(self._on_parameter_changed)
         self.cutoff_high_spin.setEnabled(False)  # Only for bandpass/bandstop
 

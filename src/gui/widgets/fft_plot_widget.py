@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QMessageBox
 )
 from PyQt5.QtCore import QTimer, pyqtSlot, pyqtSignal, Qt, QThread, QObject
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Union
 
 try:
     import pyqtgraph as pg
@@ -24,6 +24,7 @@ except ImportError:
 from ...utils.logger import get_logger
 from ...utils.constants import GUIDefaults, ProcessingDefaults
 from ...processing.long_window_fft import LongWindowFFTProcessor
+from ...processing.filters import apply_zero_phase_filter
 from ...export.data_file_reader import DataFileReader
 
 
@@ -88,6 +89,8 @@ class FFTPlotWidget(QWidget):
         self.data_file_info: Optional[dict] = None
         self.long_fft_processor: Optional[LongWindowFFTProcessor] = None
         self.long_window_duration = "200s"  # Default long window
+        self.filter_config: Dict = {}
+        self.filter_enabled = False
 
         if not PYQTGRAPH_AVAILABLE:
             self.logger.error("PyQtGraph not available")
@@ -339,6 +342,23 @@ class FFTPlotWidget(QWidget):
             self.file_status_label.setText("File: Error reading info")
             self.file_status_label.setStyleSheet("color: #f44336; font-style: italic;")
 
+    def set_filter_config(self, config: dict) -> None:
+        """
+        Set the filter configuration used for offline FFT analysis.
+
+        Args:
+            config: Filter configuration dictionary
+        """
+        if config is None:
+            self.filter_config = {}
+        else:
+            self.filter_config = config.copy()
+            self.filter_enabled = bool(config.get('enabled', self.filter_enabled))
+
+    def set_filter_enabled(self, enabled: bool) -> None:
+        """Enable or disable offline filtering for FFT analysis."""
+        self.filter_enabled = enabled
+
     def _on_analyze(self):
         """Analyze saved data when button clicked."""
         if not self.current_data_file or not self.current_data_file.exists():
@@ -377,12 +397,78 @@ class FFTPlotWidget(QWidget):
                 f"(requested: {max_duration}s)"
             )
 
+            # Apply filter before FFT if enabled
+            data_to_analyze = data
+            if self.filter_enabled:
+                data_to_analyze = self._apply_filter_for_analysis(data)
+
             # Perform FFT using available data
-            self._compute_and_display_fft(data, f"{actual_duration:.1f}s")
+            self._compute_and_display_fft(data_to_analyze, f"{actual_duration:.1f}s")
 
         except Exception as e:
             self.logger.error(f"FFT analysis failed: {e}")
             QMessageBox.critical(self, "Analysis Error", f"Failed to analyze data:\n{str(e)}")
+
+    def _apply_filter_for_analysis(self, data: np.ndarray) -> np.ndarray:
+        """
+        Apply configured filter to offline data before FFT analysis.
+
+        Args:
+            data: Input data of shape (n_channels, n_samples)
+
+        Returns:
+            Filtered data with same shape
+        """
+        if not self.filter_config:
+            return data
+
+        filter_type = self.filter_config.get('type', ProcessingDefaults.DEFAULT_FILTER_TYPE)
+        filter_mode = self.filter_config.get('mode', ProcessingDefaults.FILTER_MODE_LOWPASS)
+        order = int(self.filter_config.get('order', ProcessingDefaults.DEFAULT_FILTER_ORDER))
+        cutoff = self._resolve_filter_cutoff(filter_mode)
+
+        if cutoff is None:
+            raise ValueError("Filter cutoff is not configured")
+
+        self.logger.info(
+            f"Applying filter before FFT: {filter_type} {filter_mode}, "
+            f"cutoff={cutoff}, order={order}"
+        )
+
+        return apply_zero_phase_filter(
+            data,
+            filter_type,
+            filter_mode,
+            cutoff,
+            self.sample_rate,
+            order
+        )
+
+    def _resolve_filter_cutoff(
+        self,
+        filter_mode: str
+    ) -> Optional[Union[float, Tuple[float, float]]]:
+        """Resolve cutoff frequency based on filter mode and config."""
+        cutoff = self.filter_config.get('cutoff')
+
+        if filter_mode in [ProcessingDefaults.FILTER_MODE_BANDPASS,
+                           ProcessingDefaults.FILTER_MODE_BANDSTOP]:
+            if isinstance(cutoff, (list, tuple)) and len(cutoff) == 2:
+                return float(cutoff[0]), float(cutoff[1])
+
+            cutoff_low = self.filter_config.get('cutoff_low')
+            cutoff_high = self.filter_config.get('cutoff_high')
+            if cutoff_low is None or cutoff_high is None:
+                return None
+            return float(cutoff_low), float(cutoff_high)
+
+        if cutoff is None:
+            cutoff = self.filter_config.get('cutoff_low')
+
+        if cutoff is None:
+            return None
+
+        return float(cutoff)
 
     def _compute_and_display_fft(self, data: np.ndarray, window_duration: str):
         """

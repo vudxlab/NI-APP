@@ -260,6 +260,12 @@ class MainWindow(QMainWindow):
         self.plot_tabs.addTab(realtime_tab, "Time Domain")
         self.plot_tabs.addTab(fft_tab, "Frequency Domain")
 
+        # Sync filter config for offline FFT analysis
+        if self.filter_config_panel:
+            filter_config = self.filter_config_panel.get_filter_config()
+            self.fft_plot_widget.set_filter_config(filter_config)
+            self.fft_plot_widget.set_filter_enabled(filter_config.get('enabled', False))
+
         # Add both tab widgets to splitter
         splitter.addWidget(self.config_tabs)  # Left: Config tabs
         splitter.addWidget(self.plot_tabs)    # Right: Plot tabs
@@ -360,6 +366,9 @@ class MainWindow(QMainWindow):
                     'enabled': settings.processing.filter_enabled
                 }
                 self.filter_config_panel.set_filter_config(filter_config)
+                if self.fft_plot_widget:
+                    self.fft_plot_widget.set_filter_config(filter_config)
+                    self.fft_plot_widget.set_filter_enabled(settings.processing.filter_enabled)
 
             self.logger.info("Application settings loaded")
 
@@ -682,6 +691,8 @@ class MainWindow(QMainWindow):
                 f"cutoff={config['cutoff']}, order={config['order']}",
                 3000
             )
+            if self.fft_plot_widget:
+                self.fft_plot_widget.set_filter_config(config)
 
         except Exception as e:
             self.logger.error(f"Failed to configure filter: {e}")
@@ -707,6 +718,8 @@ class MainWindow(QMainWindow):
         status = "enabled" if enabled else "disabled"
         self.statusBar().showMessage(f"Filtering {status}", 2000)
         self.logger.info(f"Filtering {status}")
+        if self.fft_plot_widget:
+            self.fft_plot_widget.set_filter_enabled(enabled)
 
     def _on_new_configuration(self):
         """Create new configuration."""
