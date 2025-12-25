@@ -1,0 +1,124 @@
+[tool.pytest.ini_options]
+# Pytest configuration file
+
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# Markers for categorizing tests
+markers = [
+    "unit: Unit tests (fast, isolated)",
+    "integration: Integration tests (slower, may use external resources)",
+    "gui: GUI tests (require Qt)",
+    "slow: Slow tests (take > 1 second)",
+    "hardware: Tests requiring NI DAQ hardware",
+    "simulation: Tests using simulation mode",
+]
+
+# Output options
+addopts = [
+    "-v",                    # Verbose output
+    "--strict-markers",      # Error on unknown markers
+    "--tb=short",           # Shorter traceback format
+    "--cov=src",            # Coverage for src directory
+    "--cov-report=term-missing",  # Show missing lines in terminal
+    "--cov-report=html",    # HTML coverage report
+    "--cov-report=xml",     # XML coverage report for CI
+]
+
+# Ignore paths
+norecursedirs = [
+    ".git",
+    ".tox",
+    "dist",
+    "build",
+    "*egg*",
+    "venv",
+    "ENV",
+]
+
+# Logging
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)s] %(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+# Warnings
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+# Timeout for tests (requires pytest-timeout)
+timeout = 300
+
+# Maximum number of processes for pytest-xdist
+# addopts = "-n auto"  # Uncomment to enable parallel testing
+
+[tool.coverage.run]
+# Coverage configuration
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+# Precision for coverage percentages
+precision = 2
+
+# Exclude lines from coverage
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.mypy]
+# Type checking configuration
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+[tool.black]
+# Code formatting
+line-length = 100
+target-version = ['py38']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+# Import sorting
+profile = "black"
+line_length = 100
+skip = [
+    ".git",
+    ".tox",
+    "venv",
+    "build",
+    "dist"
+]

@@ -1,0 +1,46 @@
+{
+  "version": "1.0",
+  "gui": {
+    "window_width": 1600,
+    "window_height": 900,
+    "window_x": 160,
+    "window_y": 90,
+    "window_maximized": false,
+    "daq_config_visible": true,
+    "channel_config_visible": true,
+    "filter_config_visible": true,
+    "export_visible": false,
+    "current_tab": 0,
+    "realtime_time_window": 5.0,
+    "realtime_update_rate": 30,
+    "realtime_autoscale": true,
+    "fft_scale": "dB",
+    "fft_show_peaks": true,
+    "fft_peak_threshold": 0.1,
+    "use_dark_theme": false
+  },
+  "processing": {
+    "filter_type": "butterworth",
+    "filter_mode": "lowpass",
+    "filter_cutoff": 1000.0,
+    "filter_order": 4,
+    "filter_enabled": false,
+    "fft_window_size": 2048,
+    "fft_window_function": "hann",
+    "fft_overlap": 0.5,
+    "fft_enabled": true
+  },
+  "export": {
+    "default_format": "tdms",
+    "default_directory": "",
+    "include_metadata": true,
+    "hdf5_compression": true,
+    "hdf5_compression_level": 4,
+    "time_range_selection": "all"
+  },
+  "last_device_name": "cDAQ1",
+  "last_sample_rate": 1024,
+  "last_num_modules": 2,
+  "auto_save_last_config": true,
+  "check_for_updates": false
+}
