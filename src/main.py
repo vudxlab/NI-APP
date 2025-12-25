@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from PyQt5.QtWidgets import QApplication, QSplashScreen
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QCoreApplication
 from PyQt5.QtGui import QFont, QPixmap, QSurfaceFormat
 
 # Import application components
@@ -55,6 +55,10 @@ def initialize_application():
     Returns:
         QApplication instance
     """
+    # Set attributes required by QtWebEngine before QApplication
+    QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+    setup_high_dpi()
+
     # Create QApplication
     app = QApplication(sys.argv)
 
@@ -63,9 +67,6 @@ def initialize_application():
     app.setApplicationVersion(AppConfig.APP_VERSION)
     app.setOrganizationName(AppConfig.ORGANIZATION_NAME)
     app.setOrganizationDomain("ni-daq-app")
-
-    # Set up high DPI scaling
-    setup_high_dpi()
 
     # Set default font size for better readability
     font = app.font()

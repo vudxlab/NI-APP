@@ -1,7 +1,7 @@
 """
 FFT Plot Widget for frequency-domain visualization.
 
-This widget provides real-time FFT/spectrum plotting using PyQtGraph.
+This widget provides real-time FFT/spectrum plotting using Plotly.
 """
 
 import numpy as np
@@ -15,11 +15,13 @@ from PyQt5.QtCore import QTimer, pyqtSlot, pyqtSignal, Qt, QThread, QObject
 from typing import List, Dict, Optional, Tuple, Union
 
 try:
-    import pyqtgraph as pg
-    PYQTGRAPH_AVAILABLE = True
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from .plotly_view import PlotlyView
+    PLOTLY_AVAILABLE = True
 except ImportError:
-    PYQTGRAPH_AVAILABLE = False
-    print("Warning: PyQtGraph not available. Install with: pip install pyqtgraph")
+    PLOTLY_AVAILABLE = False
+    print("Warning: Plotly or QtWebEngine not available. Install plotly and PyQtWebEngine.")
 
 from ...utils.logger import get_logger
 from ...utils.constants import GUIDefaults, ProcessingDefaults
@@ -68,21 +70,9 @@ class FFTPlotWidget(QWidget):
         self.magnitudes: Optional[np.ndarray] = None
         self.peaks: List[Dict] = []
 
-        # Plot curves and scatter items
-        self.curves: List['pg.PlotDataItem'] = []
-        self.peak_markers: List['pg.ScatterPlotItem'] = []
+        # Plot view (Plotly)
+        self.plot_view: Optional['PlotlyView'] = None
         self.channel_visible: List[bool] = []
-        
-        # Plot widgets for stack mode (one per channel)
-        self.plot_widgets: List['pg.PlotWidget'] = []
-        self.graphics_layout = None  # For multi-subplot layout
-        self._cursor_proxy = None
-        self._click_proxy = None
-        self.cursor_label: Optional[QLabel] = None
-        self.selected_peak_markers: List['pg.ScatterPlotItem'] = []
-        self.selected_points: List[Optional[Tuple[float, float]]] = []
-        self.overlay_pick_marker: Optional['pg.ScatterPlotItem'] = None
-        self.overlay_selected_point: Optional[Tuple[float, float]] = None
 
         # Display settings
         self.magnitude_scale = "dB"  # "linear" or "dB"
@@ -101,8 +91,8 @@ class FFTPlotWidget(QWidget):
         self.filter_config: Dict = {}
         self.filter_enabled = False
 
-        if not PYQTGRAPH_AVAILABLE:
-            self.logger.error("PyQtGraph not available")
+        if not PLOTLY_AVAILABLE:
+            self.logger.error("Plotly or QtWebEngine not available")
 
         self._init_ui()
 
@@ -115,51 +105,19 @@ class FFTPlotWidget(QWidget):
         controls_layout = self._create_controls()
         layout.addLayout(controls_layout)
 
-        if PYQTGRAPH_AVAILABLE:
-            pg.setConfigOptions(antialias=True)
-
-            # Create container for plots
-            self.plot_container = QVBoxLayout()
-            
-            # Create single plot widget (for overlay mode)
-            self.plot_widget = pg.PlotWidget()
-            self.plot_widget.setBackground(GUIDefaults.PLOT_BACKGROUND)
-            plot_item = self.plot_widget.getPlotItem()
-            self._apply_plot_style(plot_item, show_bottom_axis=True)
-            plot_item.setLabel(
-                'left',
-                'Magnitude',
-                units=self._get_magnitude_unit(),
-                color=GUIDefaults.PLOT_AXIS_COLOR
-            )
-            plot_item.setLabel('bottom', 'Frequency', units='Hz', color=GUIDefaults.PLOT_AXIS_COLOR)
-            self.plot_widget.addLegend()
-
-            # Enable log x-axis option
-            self.plot_widget.setLogMode(x=False, y=False)
-
-            self.plot_container.addWidget(self.plot_widget)
-            layout.addLayout(self.plot_container)
+        if PLOTLY_AVAILABLE:
+            self.plot_view = PlotlyView()
+            layout.addWidget(self.plot_view)
+            # Initial empty plot will be set after widget is shown
+            # to ensure proper rendering. Increase delay to 500ms for Plotly.js to load
+            print("FFTPlotWidget: Scheduling _init_empty_plot in 500ms")
+            QTimer.singleShot(500, self._init_empty_plot)
         else:
             # Placeholder if PyQtGraph not available
-            placeholder = QLabel("PyQtGraph not installed.\nInstall with: pip install pyqtgraph")
+            placeholder = QLabel("Plotly/QtWebEngine not installed.\nInstall with: pip install plotly PyQtWebEngine")
             placeholder.setAlignment(Qt.AlignCenter)
             placeholder.setStyleSheet("QLabel { color: red; font-size: 14px; }")
             layout.addWidget(placeholder)
-
-    def _apply_plot_style(self, plot_item: 'pg.PlotItem', show_bottom_axis: bool):
-        plot_item.showGrid(x=True, y=True, alpha=GUIDefaults.PLOT_GRID_ALPHA)
-        plot_item.getViewBox().setBorder(
-            pg.mkPen(GUIDefaults.PLOT_FRAME_COLOR, width=GUIDefaults.PLOT_FRAME_WIDTH)
-        )
-        axis_pen = pg.mkPen(GUIDefaults.PLOT_AXIS_COLOR, width=GUIDefaults.PLOT_AXIS_WIDTH)
-        for axis_name in ("left", "bottom"):
-            axis = plot_item.getAxis(axis_name)
-            axis.setPen(axis_pen)
-            axis.setTextPen(GUIDefaults.PLOT_AXIS_COLOR)
-        bottom_axis = plot_item.getAxis("bottom")
-        bottom_axis.setStyle(showValues=show_bottom_axis)
-        plot_item.showAxis('bottom')
 
     def _create_controls(self) -> QVBoxLayout:
         """Create control panel."""
@@ -289,10 +247,6 @@ class FFTPlotWidget(QWidget):
         controls_layout.addWidget(self.clear_button)
 
         controls_layout.addStretch()
-        self.cursor_label = QLabel("Cursor: --")
-        self.cursor_label.setVisible(False)
-        controls_layout.addWidget(self.cursor_label)
-
         controls_main_layout.addLayout(controls_layout)
 
         return controls_main_layout
@@ -331,21 +285,9 @@ class FFTPlotWidget(QWidget):
 
         # Initialize visibility
         self.channel_visible = [True] * n_channels
-        self.selected_points = [None] * n_channels
-        self.overlay_selected_point = None
 
-        # Create plot curves
-        if PYQTGRAPH_AVAILABLE:
-            self._create_curves()
-
-        # Update plot labels
-        if PYQTGRAPH_AVAILABLE:
-            self.plot_widget.setLabel(
-                'left',
-                'Magnitude',
-                units=self._get_magnitude_unit(),
-                color=GUIDefaults.PLOT_AXIS_COLOR
-            )
+        if PLOTLY_AVAILABLE:
+            self._rebuild_plots()
 
         # Initialize long-window FFT processor
         self.long_fft_processor = LongWindowFFTProcessor(
@@ -353,175 +295,9 @@ class FFTPlotWidget(QWidget):
             window_function='hann'
         )
 
-        self._enable_cursor(self.display_mode)
-
         self.logger.info(
             f"FFT plot configured: {n_channels} channels @ {sample_rate} Hz, units={channel_units}"
         )
-
-    def _enable_cursor(self, mode: str):
-        if not PYQTGRAPH_AVAILABLE or self.cursor_label is None:
-            return
-
-        if self._cursor_proxy is not None:
-            try:
-                self._cursor_proxy.disconnect()
-            except Exception:
-                pass
-            self._cursor_proxy = None
-
-        if mode == "stack" and self.graphics_layout is not None:
-            self.cursor_label.setVisible(True)
-            self._cursor_proxy = pg.SignalProxy(
-                self.graphics_layout.scene().sigMouseMoved,
-                rateLimit=30,
-                slot=self._on_stack_mouse_moved
-            )
-        elif mode == "overlay":
-            self.cursor_label.setVisible(True)
-            self._cursor_proxy = pg.SignalProxy(
-                self.plot_widget.scene().sigMouseMoved,
-                rateLimit=30,
-                slot=self._on_overlay_mouse_moved
-            )
-        else:
-            self.cursor_label.setVisible(False)
-            self.cursor_label.setText("Cursor: --")
-
-        self._enable_click_pick(mode)
-
-    def _enable_click_pick(self, mode: str):
-        if not PYQTGRAPH_AVAILABLE:
-            return
-
-        if self._click_proxy is not None:
-            try:
-                self._click_proxy.disconnect()
-            except Exception:
-                pass
-            self._click_proxy = None
-
-        if mode == "stack" and self.graphics_layout is not None:
-            self._click_proxy = pg.SignalProxy(
-                self.graphics_layout.scene().sigMouseClicked,
-                rateLimit=5,
-                slot=self._on_stack_mouse_clicked
-            )
-        elif mode == "overlay":
-            self._click_proxy = pg.SignalProxy(
-                self.plot_widget.scene().sigMouseClicked,
-                rateLimit=5,
-                slot=self._on_overlay_mouse_clicked
-            )
-
-    def _on_stack_mouse_moved(self, event):
-        if not self.plot_widgets or self.cursor_label is None:
-            return
-
-        pos = event[0] if isinstance(event, tuple) else event
-        for plot in self.plot_widgets:
-            view_box = plot.getViewBox()
-            if view_box.sceneBoundingRect().contains(pos):
-                mouse_point = view_box.mapSceneToView(pos)
-                x = mouse_point.x()
-                y = mouse_point.y()
-                if not (np.isfinite(x) and np.isfinite(y)):
-                    self.cursor_label.setText("Cursor: --")
-                    return
-                self.cursor_label.setText(
-                    f"Cursor: {x:,.2f} Hz, {y:,.2f} {self._get_magnitude_unit()}"
-                )
-                return
-
-        self.cursor_label.setText("Cursor: --")
-
-    def _on_overlay_mouse_moved(self, event):
-        if self.cursor_label is None:
-            return
-
-        pos = event[0] if isinstance(event, tuple) else event
-        view_box = self.plot_widget.getViewBox()
-        if not view_box.sceneBoundingRect().contains(pos):
-            self.cursor_label.setText("Cursor: --")
-            return
-
-        mouse_point = view_box.mapSceneToView(pos)
-        x = mouse_point.x()
-        y = mouse_point.y()
-        if not (np.isfinite(x) and np.isfinite(y)):
-            self.cursor_label.setText("Cursor: --")
-            return
-        self.cursor_label.setText(
-            f"Cursor: {x:,.2f} Hz, {y:,.2f} {self._get_magnitude_unit()}"
-        )
-
-    def _on_stack_mouse_clicked(self, event):
-        pos = event[0] if isinstance(event, tuple) else event
-        if hasattr(pos, "scenePos"):
-            pos = pos.scenePos()
-        for channel, plot in enumerate(self.plot_widgets):
-            view_box = plot.getViewBox()
-            if view_box.sceneBoundingRect().contains(pos):
-                mouse_point = view_box.mapSceneToView(pos)
-                self._set_selected_point(channel, mouse_point.x(), mouse_point.y())
-                return
-
-    def _on_overlay_mouse_clicked(self, event):
-        pos = event[0] if isinstance(event, tuple) else event
-        if hasattr(pos, "scenePos"):
-            pos = pos.scenePos()
-        view_box = self.plot_widget.getViewBox()
-        if not view_box.sceneBoundingRect().contains(pos):
-            return
-        mouse_point = view_box.mapSceneToView(pos)
-        self._set_overlay_selected_point(mouse_point.x(), mouse_point.y())
-
-    def _set_selected_point(self, channel: int, freq: float, mag: float):
-        if channel >= len(self.selected_peak_markers):
-            return
-
-        self.selected_points[channel] = (freq, mag)
-        marker = self.selected_peak_markers[channel]
-        marker.setData([freq], [mag])
-        marker.show()
-
-    def _set_overlay_selected_point(self, freq: float, mag: float):
-        if self.overlay_pick_marker is None:
-            return
-
-        self.overlay_selected_point = (freq, mag)
-        self.overlay_pick_marker.setData([freq], [mag])
-        self.overlay_pick_marker.show()
-
-    def _refresh_selected_markers(self):
-        if not self.selected_peak_markers:
-            return
-
-        for channel, marker in enumerate(self.selected_peak_markers):
-            if channel >= len(self.selected_points):
-                marker.hide()
-                continue
-            selected = self.selected_points[channel]
-            if selected is None:
-                marker.hide()
-                continue
-            freq, mag = selected
-            if self.frequency_limit != "Full" and freq > float(self.frequency_limit):
-                marker.hide()
-                continue
-            marker.setData([freq], [mag])
-            marker.show()
-
-        if self.overlay_pick_marker is not None:
-            if self.overlay_selected_point is None:
-                self.overlay_pick_marker.hide()
-            else:
-                freq, mag = self.overlay_selected_point
-                if self.frequency_limit != "Full" and freq > float(self.frequency_limit):
-                    self.overlay_pick_marker.hide()
-                else:
-                    self.overlay_pick_marker.setData([freq], [mag])
-                    self.overlay_pick_marker.show()
 
     def set_data_file(self, filepath: str):
         """
@@ -610,7 +386,7 @@ class FFTPlotWidget(QWidget):
                 return
 
             # Ensure plot is configured for saved data analysis
-            if self.n_channels != data.shape[0] or not self.curves:
+            if self.n_channels != data.shape[0]:
                 sample_rate = self.sample_rate
                 if self.data_file_info and 'sample_rate' in self.data_file_info:
                     sample_rate = float(self.data_file_info['sample_rate'])
@@ -931,173 +707,71 @@ class FFTPlotWidget(QWidget):
         return 2 ** power
 
     def _create_curves(self):
-        """Create plot curves for each channel."""
-        if not PYQTGRAPH_AVAILABLE:
-            return
-
-        if self.display_mode == "overlay":
-            self._create_overlay_plots()
-        else:  # stack mode
-            self._create_stack_plots()
+        """No-op for Plotly backend (plots are rebuilt per update)."""
+        return
     
     def _create_overlay_plots(self):
-        """Create single plot with all channels overlaid."""
-        # Clear existing items
-        self.plot_widget.clear()
-        self.curves = []
-        self.peak_markers = []
-        self.selected_peak_markers = []
-        self.overlay_pick_marker = None
-
-        # Create a curve for each channel
-        colors = GUIDefaults.PLOT_COLORS
-
-        for i in range(self.n_channels):
-            color = colors[i % len(colors)]
-            pen = pg.mkPen(color=color, width=GUIDefaults.PLOT_LINE_WIDTH)
-
-            # Create main curve
-            curve = self.plot_widget.plot(
-                pen=pen,
-                name=self.channel_names[i]
-            )
-            self.curves.append(curve)
-
-            # Create peak marker (scatter plot)
-            marker = pg.ScatterPlotItem(
-                size=10,
-                pen=pg.mkPen(None),
-                brush=pg.mkBrush(color),
-                symbol='o'
-            )
-            self.plot_widget.addItem(marker)
-            marker.hide()
-            self.peak_markers.append(marker)
-
-            selected_marker = pg.ScatterPlotItem(
-                size=12,
-                pen=pg.mkPen(color, width=2),
-                brush=pg.mkBrush('w'),
-                symbol='x'
-            )
-            self.plot_widget.addItem(selected_marker)
-            selected_marker.hide()
-            self.selected_peak_markers.append(selected_marker)
-
-        self.overlay_pick_marker = pg.ScatterPlotItem(
-            size=12,
-            pen=pg.mkPen(GUIDefaults.PLOT_AXIS_COLOR, width=2),
-            brush=pg.mkBrush('w'),
-            symbol='+'
-        )
-        self.plot_widget.addItem(self.overlay_pick_marker)
-        self.overlay_pick_marker.hide()
-
-        self.logger.debug(f"Created {len(self.curves)} overlay FFT curves")
+        """No-op for Plotly backend (plots are rebuilt per update)."""
+        return
     
     def _create_stack_plots(self):
-        """Create separate subplot for each channel."""
-        self.curves = []
-        self.peak_markers = []
-        self.plot_widgets = []
-        
-        # Clear single plot widget
-        self.plot_widget.clear()
-        
-        # Create GraphicsLayoutWidget for multiple subplots
-        if self.graphics_layout is None:
-            self.graphics_layout = pg.GraphicsLayoutWidget()
-            self.graphics_layout.setBackground(GUIDefaults.PLOT_BACKGROUND)
+        """No-op for Plotly backend (plots are rebuilt per update)."""
+        return
+
+    def _plotly_background(self) -> str:
+        return "#ffffff" if GUIDefaults.PLOT_BACKGROUND == "w" else GUIDefaults.PLOT_BACKGROUND
+
+    def _base_layout(self, y_title: str, x_title: str, show_legend: bool) -> Dict:
+        return {
+            "autosize": True,
+            "margin": {"l": 60, "r": 20, "t": 20, "b": 45},
+            "plot_bgcolor": self._plotly_background(),
+            "paper_bgcolor": self._plotly_background(),
+            "showlegend": show_legend,
+            "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+            "xaxis": {
+                "title": x_title,
+                "showgrid": True,
+                "gridcolor": "#e0e0e0",
+                "zeroline": False,
+                "automargin": True
+            },
+            "yaxis": {
+                "title": y_title,
+                "showgrid": True,
+                "gridcolor": "#e0e0e0",
+                "zeroline": False,
+                "automargin": True
+            }
+        }
+
+    def _init_empty_plot(self):
+        """Initialize empty plot after widget is visible."""
+        print("FFTPlotWidget._init_empty_plot: Called")
+        if PLOTLY_AVAILABLE and self.plot_view is not None:
+            print(f"FFTPlotWidget._init_empty_plot: Calling update_plot, view size={self.plot_view.size()}")
+            self.plot_view.update_plot(
+                [],
+                self._base_layout(
+                    y_title=f"Magnitude ({self._get_magnitude_unit()})",
+                    x_title="Frequency (Hz)",
+                    show_legend=True
+                )
+            )
+            print("FFTPlotWidget._init_empty_plot: update_plot called")
         else:
-            self.graphics_layout.clear()
-        
-        colors = GUIDefaults.PLOT_COLORS
-        
-        first_plot = None
-        log_y = (self.magnitude_scale == "dB")
-        for i in range(self.n_channels):
-            # Create subplot
-            plot = self.graphics_layout.addPlot(row=i, col=0)
-            self._apply_plot_style(plot, show_bottom_axis=(i == self.n_channels - 1))
-            plot.setLabel(
-                'left',
-                f'{self.channel_names[i]} ({self._get_magnitude_unit()})',
-                color=GUIDefaults.PLOT_AXIS_COLOR
-            )
-            plot.setLogMode(x=False, y=log_y)
-            
-            # Only show x-axis label on bottom plot
-            if i == self.n_channels - 1:
-                plot.setLabel('bottom', 'Frequency', units='Hz', color=GUIDefaults.PLOT_AXIS_COLOR)
-
-            if first_plot is None:
-                first_plot = plot
-            else:
-                plot.setXLink(first_plot)
-            
-            # Create curve for this channel
-            color = colors[i % len(colors)]
-            pen = pg.mkPen(color=color, width=GUIDefaults.PLOT_LINE_WIDTH)
-            curve = plot.plot(pen=pen)
-            
-            # Create peak marker
-            marker = pg.ScatterPlotItem(
-                size=10,
-                pen=pg.mkPen(None),
-                brush=pg.mkBrush(color),
-                symbol='o'
-            )
-            plot.addItem(marker)
-            marker.hide()
-            
-            self.curves.append(curve)
-            self.peak_markers.append(marker)
-
-            selected_marker = pg.ScatterPlotItem(
-                size=12,
-                pen=pg.mkPen(color, width=2),
-                brush=pg.mkBrush('w'),
-                symbol='x'
-            )
-            plot.addItem(selected_marker)
-            selected_marker.hide()
-            self.selected_peak_markers.append(selected_marker)
-            self.plot_widgets.append(plot)
-        
-        self.logger.debug(f"Created {len(self.curves)} stacked FFT subplots")
+            print(f"FFTPlotWidget._init_empty_plot: Skipped, PLOTLY_AVAILABLE={PLOTLY_AVAILABLE}, plot_view={self.plot_view}")
     
     def _rebuild_plots(self):
         """Rebuild plots when switching between overlay and stack modes."""
-        if not PYQTGRAPH_AVAILABLE:
+        if not PLOTLY_AVAILABLE:
             return
-        
-        # Clear container
-        while self.plot_container.count():
-            item = self.plot_container.takeAt(0)
-            if item.widget():
-                item.widget().setParent(None)
-        
-        if self.display_mode == "overlay":
-            # Show single plot widget
-            self.plot_container.addWidget(self.plot_widget)
-            self._create_overlay_plots()
-        else:  # stack
-            # Show graphics layout with subplots
-            if self.graphics_layout is None:
-                self.graphics_layout = pg.GraphicsLayoutWidget()
-                self.graphics_layout.setBackground(GUIDefaults.PLOT_BACKGROUND)
-            self.plot_container.addWidget(self.graphics_layout)
-            self._create_stack_plots()
-        
-        # Replot with current data if available
+
         if self.frequencies is not None and self.magnitudes is not None:
             if self.display_mode == "overlay":
                 self._update_overlay_plots()
             else:
                 self._update_stack_plots()
-
-        self._enable_cursor(self.display_mode)
-        self._refresh_selected_markers()
 
         self.logger.info(f"Rebuilt FFT plots in {self.display_mode} mode")
 
@@ -1130,17 +804,20 @@ class FFTPlotWidget(QWidget):
         """Update plots in overlay mode (single plot with all channels)."""
         if self.frequencies is None or self.magnitudes is None:
             return
+        if not PLOTLY_AVAILABLE or self.plot_view is None:
+            return
 
-        for channel in range(len(self.curves)):
+        colors = GUIDefaults.PLOT_COLORS
+        traces = []
+        for channel in range(self.n_channels):
             if channel >= len(self.magnitudes):
                 continue
-
-            self.logger.debug(f"Updating FFT overlay for channel {channel}")
+            if channel < len(self.channel_visible) and not self.channel_visible[channel]:
+                continue
 
             freq = self.frequencies
             mag = self.magnitudes[channel]
 
-            # Apply frequency range limit
             if self.frequency_limit != "Full":
                 max_freq = float(self.frequency_limit)
                 mask = freq <= max_freq
@@ -1150,55 +827,82 @@ class FFTPlotWidget(QWidget):
                 freq_plot = freq
                 mag_plot = mag.copy()
 
-            # Update curve
-            if self.channel_visible[channel]:
-                self.curves[channel].setData(freq_plot, mag_plot)
-                self.curves[channel].show()
-            else:
-                self.curves[channel].hide()
+            traces.append(
+                go.Scatter(
+                    x=freq_plot,
+                    y=mag_plot,
+                    mode="lines",
+                    name=self.channel_names[channel],
+                    line={"color": colors[channel % len(colors)], "width": GUIDefaults.PLOT_LINE_WIDTH}
+                )
+            )
 
-        # Display peaks if enabled
-        if self.show_peaks and self.peaks:
-            for peak_info in self.peaks:
-                channel = peak_info['channel']
-                if channel < len(self.peak_markers):
-                    # Apply frequency limit to peaks
+            if self.show_peaks and self.peaks:
+                peak_info = next((p for p in self.peaks if p['channel'] == channel), None)
+                if peak_info is not None:
                     peak_freqs = peak_info['frequencies']
                     peak_mags = peak_info['magnitudes']
-
                     if self.frequency_limit != "Full":
                         max_freq = float(self.frequency_limit)
                         mask = peak_freqs <= max_freq
                         peak_freqs = peak_freqs[mask]
                         peak_mags = peak_mags[mask]
-
                     if len(peak_freqs) > 0:
-                        self.peak_markers[channel].setData(peak_freqs, peak_mags)
-                        self.peak_markers[channel].show()
-                    else:
-                        self.peak_markers[channel].hide()
+                        traces.append(
+                            go.Scatter(
+                                x=peak_freqs,
+                                y=peak_mags,
+                                mode="markers",
+                                name=f"{self.channel_names[channel]} peaks",
+                                marker={"color": colors[channel % len(colors)], "size": 8},
+                                showlegend=False
+                            )
+                        )
 
-        # Auto-scale if enabled
-        if self.auto_scale:
-            self.plot_widget.enableAutoRange()
-
-        self._refresh_selected_markers()
+        layout = self._base_layout(
+            y_title=f"Magnitude ({self._get_magnitude_unit()})",
+            x_title="Frequency (Hz)",
+            show_legend=True
+        )
+        if self.frequency_limit != "Full":
+            layout["xaxis"]["range"] = [0, float(self.frequency_limit)]
+        self.plot_view.update_plot(traces, layout)
 
     def _update_stack_plots(self):
         """Update plots in stack mode (separate subplot for each channel)."""
         if self.frequencies is None or self.magnitudes is None:
             return
+        if not PLOTLY_AVAILABLE or self.plot_view is None:
+            return
 
-        for channel in range(len(self.curves)):
+        # Count visible channels
+        visible_count = sum(1 for i in range(min(self.n_channels, len(self.channel_visible)))
+                           if self.channel_visible[i] and i < len(self.magnitudes))
+
+        if visible_count == 0:
+            return
+
+        # Create subplots with proper spacing
+        fig = make_subplots(
+            rows=self.n_channels,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.05,
+            subplot_titles=[self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}"
+                          for i in range(self.n_channels)]
+        )
+
+        colors = GUIDefaults.PLOT_COLORS
+
+        for channel in range(self.n_channels):
             if channel >= len(self.magnitudes):
                 continue
-
-            self.logger.debug(f"Updating FFT stack for channel {channel}")
+            if channel < len(self.channel_visible) and not self.channel_visible[channel]:
+                continue
 
             freq = self.frequencies
             mag = self.magnitudes[channel]
 
-            # Apply frequency range limit
             if self.frequency_limit != "Full":
                 max_freq = float(self.frequency_limit)
                 mask = freq <= max_freq
@@ -1208,40 +912,89 @@ class FFTPlotWidget(QWidget):
                 freq_plot = freq
                 mag_plot = mag.copy()
 
-            # Update curve in its own subplot
-            if self.channel_visible[channel]:
-                self.curves[channel].setData(freq_plot, mag_plot)
-                self.curves[channel].show()
+            # CRITICAL FIX: Convert numpy arrays to Python lists
+            # fig.to_dict() has a bug with numpy arrays in subplots - it loses data
+            freq_list = freq_plot.tolist() if hasattr(freq_plot, 'tolist') else list(freq_plot)
+            mag_list = mag_plot.tolist() if hasattr(mag_plot, 'tolist') else list(mag_plot)
 
-                # Auto-scale individual subplot if enabled
-                if self.auto_scale and channel < len(self.plot_widgets):
-                    self.plot_widgets[channel].enableAutoRange()
+            fig.add_trace(
+                go.Scatter(
+                    x=freq_list,  # ← Use Python list instead of numpy array
+                    y=mag_list,   # ← Use Python list instead of numpy array
+                    mode="lines",
+                    name=self.channel_names[channel] if channel < len(self.channel_names) else f"Ch{channel+1}",
+                    line={"color": colors[channel % len(colors)], "width": GUIDefaults.PLOT_LINE_WIDTH},
+                    showlegend=False
+                ),
+                row=channel + 1,
+                col=1
+            )
 
-            else:
-                self.curves[channel].hide()
-
-        self._refresh_selected_markers()
-
-        # Display peaks if enabled
-        if self.show_peaks and self.peaks:
-            for peak_info in self.peaks:
-                channel = peak_info['channel']
-                if channel < len(self.peak_markers):
-                    # Apply frequency limit to peaks
+            if self.show_peaks and self.peaks:
+                peak_info = next((p for p in self.peaks if p['channel'] == channel), None)
+                if peak_info is not None:
                     peak_freqs = peak_info['frequencies']
                     peak_mags = peak_info['magnitudes']
-
                     if self.frequency_limit != "Full":
                         max_freq = float(self.frequency_limit)
                         mask = peak_freqs <= max_freq
                         peak_freqs = peak_freqs[mask]
                         peak_mags = peak_mags[mask]
-
                     if len(peak_freqs) > 0:
-                        self.peak_markers[channel].setData(peak_freqs, peak_mags)
-                        self.peak_markers[channel].show()
-                    else:
-                        self.peak_markers[channel].hide()
+                        # Convert to lists for consistency
+                        peak_freqs_list = peak_freqs.tolist() if hasattr(peak_freqs, 'tolist') else list(peak_freqs)
+                        peak_mags_list = peak_mags.tolist() if hasattr(peak_mags, 'tolist') else list(peak_mags)
+
+                        fig.add_trace(
+                            go.Scatter(
+                                x=peak_freqs_list,
+                                y=peak_mags_list,
+                                mode="markers",
+                                marker={"color": colors[channel % len(colors)], "size": 8},
+                                showlegend=False
+                            ),
+                            row=channel + 1,
+                            col=1
+                        )
+
+            # Update y-axis for this subplot
+            fig.update_yaxes(
+                title_text=f"{self._get_magnitude_unit()}",
+                showgrid=True,
+                gridcolor="#e0e0e0",
+                zeroline=False,
+                automargin=True,
+                row=channel + 1,
+                col=1
+            )
+
+        # Update x-axis only for bottom subplot
+        fig.update_xaxes(
+            title_text="Frequency (Hz)",
+            showgrid=True,
+            gridcolor="#e0e0e0",
+            zeroline=False,
+            automargin=True,
+            row=self.n_channels,
+            col=1
+        )
+
+        if self.frequency_limit != "Full":
+            fig.update_xaxes(range=[0, float(self.frequency_limit)])
+
+        # Calculate appropriate height (min 150px per subplot)
+        plot_height = max(400, self.n_channels * 150)
+
+        fig.update_layout(
+            height=plot_height,
+            margin={"l": 60, "r": 20, "t": 40, "b": 45},
+            plot_bgcolor=self._plotly_background(),
+            paper_bgcolor=self._plotly_background(),
+            showlegend=False
+        )
+
+        fig_dict = fig.to_dict()
+        self.plot_view.update_plot(fig_dict["data"], fig_dict["layout"])
 
     def _find_peaks(self, frequencies: np.ndarray, magnitude: np.ndarray) -> List[Tuple[float, float, int]]:
         """
@@ -1288,65 +1041,34 @@ class FFTPlotWidget(QWidget):
             self.logger.error(f"Error finding peaks: {e}")
             return []
 
-    def _update_peak_markers(self, channel: int, peaks: List[Tuple[float, float, int]]):
-        """
-        Update peak markers for a channel.
-
-        Args:
-            channel: Channel index
-            peaks: List of (frequency, magnitude, index) tuples
-        """
-        if channel >= len(self.peak_markers):
-            return
-
-        marker = self.peak_markers[channel]
-
-        if len(peaks) > 0:
-            freqs = [p[0] for p in peaks]
-            mags = [p[1] for p in peaks]
-            marker.setData(freqs, mags)
-            marker.show()
-        else:
-            marker.hide()
-
     def _on_scale_changed(self, index: int):
         """Handle magnitude scale change."""
         self.magnitude_scale = self.scale_combo.currentData()
-
-        if PYQTGRAPH_AVAILABLE:
-            self.plot_widget.setLabel(
-                'left',
-                'Magnitude',
-                units=self._get_magnitude_unit(),
-                color=GUIDefaults.PLOT_AXIS_COLOR
-            )
-
-            # Update log mode for y-axis
-            log_y = (self.magnitude_scale == "dB")
-            self.plot_widget.setLogMode(x=False, y=log_y)
-            for plot in self.plot_widgets:
-                plot.setLogMode(x=False, y=log_y)
+        if self.frequencies is not None and self.magnitudes is not None:
+            if self.display_mode == "overlay":
+                self._update_overlay_plots()
+            else:
+                self._update_stack_plots()
 
         self.logger.debug(f"Magnitude scale changed to {self.magnitude_scale}")
 
     def _on_freq_range_changed(self, index: int):
         """Handle frequency range change."""
         self.frequency_limit = self.freq_combo.currentData()
-        self._refresh_selected_markers()
+        if self.frequencies is not None and self.magnitudes is not None:
+            if self.display_mode == "overlay":
+                self._update_overlay_plots()
+            else:
+                self._update_stack_plots()
         self.logger.debug(f"Frequency range changed to {self.frequency_limit}")
 
     def _on_peaks_changed(self, state: int):
         """Handle show peaks checkbox change."""
         self.show_peaks = (state == Qt.Checked)
 
-        # Hide/show all markers
-        if PYQTGRAPH_AVAILABLE:
-            for marker in self.peak_markers:
-                if not self.show_peaks:
-                    marker.hide()
-
         if self.show_peaks and self.magnitudes is not None and not self.peaks:
             self.peaks = self._find_peaks_all_channels()
+        if self.frequencies is not None and self.magnitudes is not None:
             if self.display_mode == "overlay":
                 self._update_overlay_plots()
             else:
@@ -1376,31 +1098,16 @@ class FFTPlotWidget(QWidget):
         # Rebuild plots if mode changed
         if old_mode != self.display_mode and self.n_channels > 0:
             self._rebuild_plots()
-        else:
-            self._enable_cursor(self.display_mode)
 
     def _on_clear(self):
         """Clear the plot."""
-        if not PYQTGRAPH_AVAILABLE:
+        if not PLOTLY_AVAILABLE or self.plot_view is None:
             return
-
-        for curve in self.curves:
-            curve.clear()
-
-        for marker in self.peak_markers:
-            marker.clear()
-            marker.hide()
-
-        for marker in self.selected_peak_markers:
-            marker.clear()
-            marker.hide()
-
-        if self.overlay_pick_marker is not None:
-            self.overlay_pick_marker.clear()
-            self.overlay_pick_marker.hide()
-
-        self.selected_points = [None] * len(self.selected_points)
-        self.overlay_selected_point = None
+        self.plot_view.update_plot([], self._base_layout(
+            y_title=f"Magnitude ({self._get_magnitude_unit()})",
+            x_title="Frequency (Hz)",
+            show_legend=True
+        ))
 
         self.logger.debug("FFT plot cleared")
 
@@ -1414,13 +1121,11 @@ class FFTPlotWidget(QWidget):
         """
         if 0 <= channel_idx < len(self.channel_visible):
             self.channel_visible[channel_idx] = visible
-
-            if PYQTGRAPH_AVAILABLE and channel_idx < len(self.curves):
-                if visible:
-                    self.curves[channel_idx].show()
+            if self.frequencies is not None and self.magnitudes is not None:
+                if self.display_mode == "overlay":
+                    self._update_overlay_plots()
                 else:
-                    self.curves[channel_idx].hide()
-                    self.peak_markers[channel_idx].hide()
+                    self._update_stack_plots()
 
     def show_all_channels(self):
         """Show all channels."""

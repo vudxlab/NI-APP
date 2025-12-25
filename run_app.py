@@ -7,6 +7,10 @@ This script properly sets up the Python path and launches the application.
 
 import sys
 from pathlib import Path
+from PyQt5.QtCore import QCoreApplication, Qt
+
+# Must be set before any QtWebEngine widgets are created/imported.
+QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
 # Add project root to Python path
 project_root = Path(__file__).parent
@@ -17,4 +21,3 @@ from src.main import main
 
 if __name__ == "__main__":
     main()
-

@@ -2,7 +2,7 @@
 Real-time Plot Widget for time-domain visualization.
 
 This widget provides high-performance real-time plotting of multi-channel
-acceleration data using PyQtGraph.
+acceleration data using Plotly.
 """
 
 import numpy as np
@@ -14,11 +14,13 @@ from PyQt5.QtCore import QTimer, pyqtSlot, Qt
 from typing import List, Dict, Optional
 
 try:
-    import pyqtgraph as pg
-    PYQTGRAPH_AVAILABLE = True
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from .plotly_view import PlotlyView
+    PLOTLY_AVAILABLE = True
 except ImportError:
-    PYQTGRAPH_AVAILABLE = False
-    print("Warning: PyQtGraph not available. Install with: pip install pyqtgraph")
+    PLOTLY_AVAILABLE = False
+    print("Warning: Plotly or QtWebEngine not available. Install plotly and PyQtWebEngine.")
 
 from ...utils.logger import get_logger
 from ...utils.constants import GUIDefaults
@@ -58,13 +60,11 @@ class RealtimePlotWidget(QWidget):
         self.time_data: Optional[np.ndarray] = None
         self.plot_data: Optional[np.ndarray] = None
 
-        # Plot curves
-        self.curves: List['pg.PlotDataItem'] = []
+        # Plot data cache
         self.channel_visible: List[bool] = []
         
-        # Plot widgets for stack mode (one per channel)
-        self.plot_widgets: List['pg.PlotWidget'] = []
-        self.graphics_layout = None  # For multi-subplot layout
+        # Plot view (Plotly)
+        self.plot_view: Optional['PlotlyView'] = None
 
         # Update rate limiting
         self.update_timer = QTimer()
@@ -83,8 +83,8 @@ class RealtimePlotWidget(QWidget):
         self.display_mode = "overlay"  # "overlay" or "stack"
         self.stack_offset = 10.0  # Offset between stacked channels (in display units)
 
-        if not PYQTGRAPH_AVAILABLE:
-            self.logger.error("PyQtGraph not available")
+        if not PLOTLY_AVAILABLE:
+            self.logger.error("Plotly or QtWebEngine not available")
 
         self._init_ui()
 
@@ -97,43 +97,19 @@ class RealtimePlotWidget(QWidget):
         controls_layout = self._create_controls()
         layout.addLayout(controls_layout)
 
-        if PYQTGRAPH_AVAILABLE:
-            pg.setConfigOptions(antialias=True)
-
-            # Create container for plots (will switch between single plot and GraphicsLayoutWidget)
-            self.plot_container = QVBoxLayout()
-            
-            # Create single plot widget (for overlay mode)
-            self.plot_widget = pg.PlotWidget()
-            self.plot_widget.setBackground(GUIDefaults.PLOT_BACKGROUND)
-            plot_item = self.plot_widget.getPlotItem()
-            self._apply_plot_style(plot_item, show_bottom_axis=True)
-            plot_item.setLabel('left', 'Acceleration', units=self.channel_units, color=GUIDefaults.PLOT_AXIS_COLOR)
-            plot_item.setLabel('bottom', 'Time', units='s', color=GUIDefaults.PLOT_AXIS_COLOR)
-            self.plot_widget.addLegend()
-
-            self.plot_container.addWidget(self.plot_widget)
-            layout.addLayout(self.plot_container)
+        if PLOTLY_AVAILABLE:
+            self.plot_view = PlotlyView()
+            layout.addWidget(self.plot_view)
+            # Initial empty plot will be set after widget is shown
+            # to ensure proper rendering. Increase delay to 500ms for Plotly.js to load
+            print("RealtimePlotWidget: Scheduling _init_empty_plot in 500ms")
+            QTimer.singleShot(500, self._init_empty_plot)
         else:
             # Placeholder if PyQtGraph not available
-            placeholder = QLabel("PyQtGraph not installed.\nInstall with: pip install pyqtgraph")
+            placeholder = QLabel("Plotly/QtWebEngine not installed.\nInstall with: pip install plotly PyQtWebEngine")
             placeholder.setAlignment(Qt.AlignCenter)
             placeholder.setStyleSheet("QLabel { color: red; font-size: 14px; }")
             layout.addWidget(placeholder)
-
-    def _apply_plot_style(self, plot_item: 'pg.PlotItem', show_bottom_axis: bool):
-        plot_item.showGrid(x=True, y=True, alpha=GUIDefaults.PLOT_GRID_ALPHA)
-        plot_item.getViewBox().setBorder(
-            pg.mkPen(GUIDefaults.PLOT_FRAME_COLOR, width=GUIDefaults.PLOT_FRAME_WIDTH)
-        )
-        axis_pen = pg.mkPen(GUIDefaults.PLOT_AXIS_COLOR, width=GUIDefaults.PLOT_AXIS_WIDTH)
-        for axis_name in ("left", "bottom"):
-            axis = plot_item.getAxis(axis_name)
-            axis.setPen(axis_pen)
-            axis.setTextPen(GUIDefaults.PLOT_AXIS_COLOR)
-        bottom_axis = plot_item.getAxis("bottom")
-        bottom_axis.setStyle(showValues=show_bottom_axis)
-        plot_item.showAxis('bottom')
 
     def _create_controls(self) -> QHBoxLayout:
         """Create control panel."""
@@ -227,132 +203,77 @@ class RealtimePlotWidget(QWidget):
         # Initialize visibility
         self.channel_visible = [True] * n_channels
 
-        # Create plot curves
-        if PYQTGRAPH_AVAILABLE:
-            self._create_curves()
-
-        # Update plot labels
-        if PYQTGRAPH_AVAILABLE:
-            self.plot_widget.setLabel(
-                'left',
-                'Acceleration',
-                units=channel_units,
-                color=GUIDefaults.PLOT_AXIS_COLOR
-            )
+        # Trigger a redraw on next update
+        if PLOTLY_AVAILABLE:
+            self._rebuild_plots()
 
         self.logger.info(
             f"Plot configured: {n_channels} channels @ {sample_rate} Hz, units={channel_units}"
         )
 
     def _create_curves(self):
-        """Create plot curves for each channel."""
-        if not PYQTGRAPH_AVAILABLE:
-            return
-
-        if self.display_mode == "overlay":
-            self._create_overlay_plots()
-        else:  # stack mode
-            self._create_stack_plots()
+        """No-op for Plotly backend (plots are rebuilt per update)."""
+        return
     
     def _create_overlay_plots(self):
-        """Create single plot with all channels overlaid."""
-        # Clear existing curves
-        self.plot_widget.clear()
-        self.curves = []
-
-        # Create a curve for each channel with different colors
-        colors = GUIDefaults.PLOT_COLORS
-
-        for i in range(self.n_channels):
-            color = colors[i % len(colors)]
-            pen = pg.mkPen(color=color, width=GUIDefaults.PLOT_LINE_WIDTH)
-
-            curve = self.plot_widget.plot(
-                pen=pen,
-                name=self.channel_names[i]
-            )
-
-            # Enable downsampling for performance
-            curve.setDownsampling(auto=True)
-            curve.setClipToView(True)
-
-            self.curves.append(curve)
-
-        self.logger.debug(f"Created {len(self.curves)} overlay curves")
+        """No-op for Plotly backend (plots are rebuilt per update)."""
+        return
     
     def _create_stack_plots(self):
-        """Create separate subplot for each channel."""
-        self.curves = []
-        self.plot_widgets = []
-        
-        # Clear single plot widget
-        self.plot_widget.clear()
-        
-        # Create GraphicsLayoutWidget for multiple subplots
-        if self.graphics_layout is None:
-            self.graphics_layout = pg.GraphicsLayoutWidget()
-            self.graphics_layout.setBackground(GUIDefaults.PLOT_BACKGROUND)
-        else:
-            self.graphics_layout.clear()
-        
-        colors = GUIDefaults.PLOT_COLORS
-        
-        first_plot = None
-        for i in range(self.n_channels):
-            # Create subplot
-            plot = self.graphics_layout.addPlot(row=i, col=0)
-            self._apply_plot_style(plot, show_bottom_axis=(i == self.n_channels - 1))
-            plot.setLabel(
-                'left',
-                self.channel_names[i],
-                units=self.channel_units,
-                color=GUIDefaults.PLOT_AXIS_COLOR
-            )
-            
-            # Only show x-axis label on bottom plot
-            if i == self.n_channels - 1:
-                plot.setLabel('bottom', 'Time', units='s', color=GUIDefaults.PLOT_AXIS_COLOR)
+        """No-op for Plotly backend (plots are rebuilt per update)."""
+        return
 
-            if first_plot is None:
-                first_plot = plot
-            else:
-                plot.setXLink(first_plot)
-            
-            # Create curve for this channel
-            color = colors[i % len(colors)]
-            pen = pg.mkPen(color=color, width=GUIDefaults.PLOT_LINE_WIDTH)
-            curve = plot.plot(pen=pen)
-            curve.setDownsampling(auto=True)
-            curve.setClipToView(True)
-            
-            self.curves.append(curve)
-            self.plot_widgets.append(plot)
-        
-        self.logger.debug(f"Created {len(self.curves)} stacked subplots")
+    def _plotly_background(self) -> str:
+        return "#ffffff" if GUIDefaults.PLOT_BACKGROUND == "w" else GUIDefaults.PLOT_BACKGROUND
+
+    def _base_layout(self, y_title: str, x_title: str, show_legend: bool) -> Dict:
+        return {
+            "autosize": True,
+            "margin": {"l": 60, "r": 20, "t": 20, "b": 45},
+            "plot_bgcolor": self._plotly_background(),
+            "paper_bgcolor": self._plotly_background(),
+            "showlegend": show_legend,
+            "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0},
+            "xaxis": {
+                "title": x_title,
+                "showgrid": True,
+                "gridcolor": "#e0e0e0",
+                "zeroline": False,
+                "automargin": True
+            },
+            "yaxis": {
+                "title": y_title,
+                "showgrid": True,
+                "gridcolor": "#e0e0e0",
+                "zeroline": False,
+                "automargin": True
+            }
+        }
+
+    def _init_empty_plot(self):
+        """Initialize empty plot after widget is visible."""
+        print("RealtimePlotWidget._init_empty_plot: Called")
+        if PLOTLY_AVAILABLE and self.plot_view is not None:
+            print(f"RealtimePlotWidget._init_empty_plot: Calling update_plot, view size={self.plot_view.size()}")
+            self.plot_view.update_plot(
+                [],
+                self._base_layout(
+                    y_title=f"Acceleration ({self.channel_units})",
+                    x_title="Time (s)",
+                    show_legend=True
+                )
+            )
+            print("RealtimePlotWidget._init_empty_plot: update_plot called")
+        else:
+            print(f"RealtimePlotWidget._init_empty_plot: Skipped, PLOTLY_AVAILABLE={PLOTLY_AVAILABLE}, plot_view={self.plot_view}")
     
     def _rebuild_plots(self):
         """Rebuild plots when switching between overlay and stack modes."""
-        if not PYQTGRAPH_AVAILABLE:
+        if not PLOTLY_AVAILABLE:
             return
-        
-        # Clear container
-        while self.plot_container.count():
-            item = self.plot_container.takeAt(0)
-            if item.widget():
-                item.widget().setParent(None)
-        
-        if self.display_mode == "overlay":
-            # Show single plot widget
-            self.plot_container.addWidget(self.plot_widget)
-            self._create_overlay_plots()
-        else:  # stack
-            # Show graphics layout with subplots
-            if self.graphics_layout is None:
-                self.graphics_layout = pg.GraphicsLayoutWidget()
-                self.graphics_layout.setBackground(GUIDefaults.PLOT_BACKGROUND)
-            self.plot_container.addWidget(self.graphics_layout)
-            self._create_stack_plots()
-        
+        if self._pending_data is not None:
+            self._update_plots()
+
         self.logger.info(f"Rebuilt plots in {self.display_mode} mode")
 
     @pyqtSlot(np.ndarray, float)
@@ -374,7 +295,7 @@ class RealtimePlotWidget(QWidget):
 
     def _update_plots(self):
         """Update plots with pending data (called by timer)."""
-        if self._pending_data is None or not PYQTGRAPH_AVAILABLE:
+        if self._pending_data is None or not PLOTLY_AVAILABLE:
             return
 
         try:
@@ -406,43 +327,155 @@ class RealtimePlotWidget(QWidget):
     
     def _update_overlay_plots(self, time_axis: np.ndarray, data: np.ndarray, n_samples: int):
         """Update plots in overlay mode (single plot with all channels)."""
-        for i, curve in enumerate(self.curves):
-            if i < len(self.channel_visible) and self.channel_visible[i]:
-                # Downsample if needed
-                if n_samples > self.downsample_threshold:
-                    step = n_samples // self.downsample_threshold
-                    time_ds = time_axis[::step]
-                    data_ds = data[i, ::step]
-                    curve.setData(time_ds, data_ds)
-                else:
-                    curve.setData(time_axis, data[i, :])
-                curve.show()
+        if not PLOTLY_AVAILABLE or self.plot_view is None:
+            return
+
+        colors = GUIDefaults.PLOT_COLORS
+        traces = []
+        for i in range(self.n_channels):
+            if i < len(self.channel_visible) and not self.channel_visible[i]:
+                continue
+            if i >= data.shape[0]:
+                continue
+
+            if n_samples > self.downsample_threshold:
+                step = max(1, n_samples // self.downsample_threshold)
+                x_vals = time_axis[::step]
+                y_vals = data[i, ::step]
             else:
-                curve.hide()
-        
-        # Auto-scale if enabled
-        if self.auto_scale:
-            self.plot_widget.enableAutoRange()
+                x_vals = time_axis
+                y_vals = data[i, :]
+
+            traces.append(
+                go.Scatter(
+                    x=x_vals,
+                    y=y_vals,
+                    mode="lines",
+                    name=self.channel_names[i],
+                    line={"color": colors[i % len(colors)], "width": GUIDefaults.PLOT_LINE_WIDTH}
+                )
+            )
+
+        layout = self._base_layout(
+            y_title=f"Acceleration ({self.channel_units})",
+            x_title="Time (s)",
+            show_legend=True
+        )
+        self.plot_view.update_plot(traces, layout)
     
     def _update_stack_plots(self, time_axis: np.ndarray, data: np.ndarray, n_samples: int):
         """Update plots in stack mode (separate subplot for each channel)."""
-        for i, (curve, plot_widget) in enumerate(zip(self.curves, self.plot_widgets)):
-            if i < len(self.channel_visible) and self.channel_visible[i]:
-                # Downsample if needed
-                if n_samples > self.downsample_threshold:
-                    step = n_samples // self.downsample_threshold
-                    time_ds = time_axis[::step]
-                    data_ds = data[i, ::step]
-                    curve.setData(time_ds, data_ds)
-                else:
-                    curve.setData(time_axis, data[i, :])
-                curve.show()
-                
-                # Auto-scale individual subplot if enabled
-                if self.auto_scale:
-                    plot_widget.enableAutoRange()
+        print(f"_update_stack_plots: Called with n_channels={self.n_channels}, data.shape={data.shape}, n_samples={n_samples}")
+
+        if not PLOTLY_AVAILABLE or self.plot_view is None:
+            print(f"_update_stack_plots: Skipping - PLOTLY_AVAILABLE={PLOTLY_AVAILABLE}, plot_view={self.plot_view}")
+            return
+
+        # Count visible channels
+        visible_count = sum(1 for i in range(min(self.n_channels, len(self.channel_visible)))
+                           if self.channel_visible[i] and i < data.shape[0])
+
+        print(f"_update_stack_plots: visible_count={visible_count}, channel_visible={self.channel_visible}")
+
+        if visible_count == 0:
+            print("_update_stack_plots: No visible channels, returning")
+            return
+
+        # Create subplots with proper spacing
+        fig = make_subplots(
+            rows=self.n_channels,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.05,
+            subplot_titles=[self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}"
+                          for i in range(self.n_channels)]
+        )
+
+        colors = GUIDefaults.PLOT_COLORS
+
+        for i in range(self.n_channels):
+            if i < len(self.channel_visible) and not self.channel_visible[i]:
+                continue
+            if i >= data.shape[0]:
+                continue
+
+            if n_samples > self.downsample_threshold:
+                step = max(1, n_samples // self.downsample_threshold)
+                x_vals = time_axis[::step]
+                y_vals = data[i, ::step]
             else:
-                curve.hide()
+                x_vals = time_axis
+                y_vals = data[i, :]
+
+            print(f"_update_stack_plots: Adding trace {i}: x_vals.shape={x_vals.shape}, y_vals.shape={y_vals.shape}, time_axis.shape={time_axis.shape}")
+
+            # CRITICAL FIX: Convert numpy arrays to Python lists
+            # fig.to_dict() has a bug with numpy arrays in subplots - it loses data
+            x_list = x_vals.tolist() if hasattr(x_vals, 'tolist') else list(x_vals)
+            y_list = y_vals.tolist() if hasattr(y_vals, 'tolist') else list(y_vals)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=x_list,  # ← Use Python list instead of numpy array
+                    y=y_list,  # ← Use Python list instead of numpy array
+                    mode="lines",
+                    name=self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}",
+                    line={"color": colors[i % len(colors)], "width": GUIDefaults.PLOT_LINE_WIDTH},
+                    showlegend=False
+                ),
+                row=i + 1,
+                col=1
+            )
+
+            # Update y-axis for this subplot
+            fig.update_yaxes(
+                title_text=f"{self.channel_units}",
+                showgrid=True,
+                gridcolor="#e0e0e0",
+                zeroline=False,
+                automargin=True,
+                row=i + 1,
+                col=1
+            )
+
+        # Update x-axis only for bottom subplot
+        fig.update_xaxes(
+            title_text="Time (s)",
+            showgrid=True,
+            gridcolor="#e0e0e0",
+            zeroline=False,
+            automargin=True,
+            row=self.n_channels,
+            col=1
+        )
+
+        # Calculate appropriate height (min 150px per subplot)
+        plot_height = max(400, self.n_channels * 150)
+
+        print(f"_update_stack_plots: Creating layout with height={plot_height}")
+
+        fig.update_layout(
+            height=plot_height,
+            margin={"l": 60, "r": 20, "t": 40, "b": 45},
+            plot_bgcolor=self._plotly_background(),
+            paper_bgcolor=self._plotly_background(),
+            showlegend=False
+        )
+
+        fig_dict = fig.to_dict()
+
+        print(f"_update_stack_plots: fig_dict has {len(fig_dict['data'])} traces")
+        print(f"_update_stack_plots: Layout height={fig_dict['layout'].get('height', 'NOT SET')}")
+
+        # Debug: Check axes in layout
+        layout_axes = [key for key in fig_dict['layout'].keys() if key.startswith('xaxis') or key.startswith('yaxis')]
+        print(f"_update_stack_plots: Layout has axes: {layout_axes[:10]}...")  # Print first 10
+
+        # Debug: Print trace axis assignments
+        for i, trace in enumerate(fig_dict['data'][:3]):  # First 3 traces
+            print(f"_update_stack_plots: Trace {i} - xaxis={trace.get('xaxis', 'NOT SET')}, yaxis={trace.get('yaxis', 'NOT SET')}, x_len={len(trace.get('x', []))}, y_len={len(trace.get('y', []))}")
+
+        self.plot_view.update_plot(fig_dict["data"], fig_dict["layout"])
 
     def _on_window_changed(self, index: int):
         """Handle time window change."""
@@ -452,14 +485,6 @@ class RealtimePlotWidget(QWidget):
     def _on_autoscale_changed(self, state: int):
         """Handle auto-scale checkbox change."""
         self.auto_scale = (state == Qt.Checked)
-
-        if not PYQTGRAPH_AVAILABLE:
-            return
-
-        if self.auto_scale:
-            self.plot_widget.enableAutoRange()
-        else:
-            self.plot_widget.disableAutoRange()
 
         self.logger.debug(f"Auto-scale: {self.auto_scale}")
 
@@ -482,11 +507,14 @@ class RealtimePlotWidget(QWidget):
 
     def _on_clear(self):
         """Clear the plot."""
-        if not PYQTGRAPH_AVAILABLE:
+        if not PLOTLY_AVAILABLE or self.plot_view is None:
             return
 
-        for curve in self.curves:
-            curve.clear()
+        self.plot_view.update_plot([], self._base_layout(
+            y_title=f"Acceleration ({self.channel_units})",
+            x_title="Time (s)",
+            show_legend=True
+        ))
 
         self.logger.debug("Plot cleared")
 
@@ -500,12 +528,6 @@ class RealtimePlotWidget(QWidget):
         """
         if 0 <= channel_idx < len(self.channel_visible):
             self.channel_visible[channel_idx] = visible
-
-            if PYQTGRAPH_AVAILABLE and channel_idx < len(self.curves):
-                if visible:
-                    self.curves[channel_idx].show()
-                else:
-                    self.curves[channel_idx].hide()
 
     def show_all_channels(self):
         """Show all channels."""

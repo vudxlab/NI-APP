@@ -11,16 +11,17 @@ from PyQt5.QtWidgets import (
     QCheckBox, QPushButton, QLabel, QTableWidget, QTableWidgetItem,
     QProgressBar, QMessageBox, QSpinBox, QDoubleSpinBox, QSplitter
 )
-from PyQt5.QtCore import pyqtSlot, pyqtSignal, Qt, QThread, QObject
+from PyQt5.QtCore import pyqtSlot, pyqtSignal, Qt, QThread, QObject, QTimer
 from PyQt5.QtGui import QFont
 from typing import Optional, List, Dict
 from pathlib import Path
 
 try:
-    import pyqtgraph as pg
-    PYQTGRAPH_AVAILABLE = True
+    import plotly.graph_objects as go
+    from .plotly_view import PlotlyView
+    PLOTLY_AVAILABLE = True
 except ImportError:
-    PYQTGRAPH_AVAILABLE = False
+    PLOTLY_AVAILABLE = False
 
 from ...processing.long_data_saver import LongDataSaver
 from ...processing.long_window_fft import LongWindowFFTProcessor
@@ -267,17 +268,14 @@ class LongFFTAnalysisWidget(QWidget):
         plot_group = QGroupBox("Frequency Spectrum")
         plot_layout = QVBoxLayout()
 
-        if PYQTGRAPH_AVAILABLE:
-            self.plot_widget = pg.PlotWidget()
-            self.plot_widget.setBackground('w')
-            self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-            self.plot_widget.setLabel('left', 'Magnitude')
-            self.plot_widget.setLabel('bottom', 'Frequency', units='Hz')
-            self.plot_widget.addLegend()
-            self.plot_widget.setAntialiasing(True)
+        if PLOTLY_AVAILABLE:
+            self.plot_widget = PlotlyView()
             plot_layout.addWidget(self.plot_widget)
+            # Delay initial plot to ensure widget is visible
+            # Increase delay to 500ms for Plotly.js to load
+            QTimer.singleShot(500, self._init_empty_plot)
         else:
-            placeholder = QLabel("PyQtGraph not available")
+            placeholder = QLabel("Plotly/QtWebEngine not available")
             placeholder.setAlignment(Qt.AlignCenter)
             plot_layout.addWidget(placeholder)
 
@@ -309,6 +307,31 @@ class LongFFTAnalysisWidget(QWidget):
         splitter.setSizes([300, 400])
 
         main_layout.addWidget(splitter)
+
+    def _init_empty_plot(self):
+        """Initialize empty plot after widget is visible."""
+        if PLOTLY_AVAILABLE and hasattr(self, 'plot_widget') and self.plot_widget is not None:
+            self.plot_widget.update_plot(
+                [],
+                {
+                    "margin": {"l": 60, "r": 20, "t": 20, "b": 45},
+                    "plot_bgcolor": "#ffffff",
+                    "paper_bgcolor": "#ffffff",
+                    "showlegend": True,
+                    "xaxis": {
+                        "title": "Frequency (Hz)",
+                        "showgrid": True,
+                        "gridcolor": "#e0e0e0",
+                        "zeroline": False
+                    },
+                    "yaxis": {
+                        "title": "Magnitude",
+                        "showgrid": True,
+                        "gridcolor": "#e0e0e0",
+                        "zeroline": False
+                    }
+                }
+            )
 
     def set_buffer(self, buffer):
         """Set reference to data buffer."""
@@ -530,40 +553,62 @@ class LongFFTAnalysisWidget(QWidget):
 
     def _update_plot(self, results):
         """Update the plot with results."""
-        if not PYQTGRAPH_AVAILABLE:
+        if not PLOTLY_AVAILABLE or self.plot_widget is None:
             return
 
-        # Clear previous plot
-        self.plot_widget.clear()
-
-        # Get data limited to max frequency
         max_freq = self.max_freq_spin.value()
         frequencies = results['low_freq_analysis']['frequencies']
         magnitude = results['low_freq_analysis']['magnitude']
 
-        # Plot spectrum
-        self.plot_curve = self.plot_widget.plot(
-            frequencies,
-            magnitude,
-            pen=pg.mkPen(color='b', width=2),
-            name='Magnitude'
-        )
+        if max_freq > 0:
+            mask = frequencies <= max_freq
+            frequencies = frequencies[mask]
+            magnitude = magnitude[mask]
 
-        # Plot peaks
+        traces = [
+            go.Scatter(
+                x=frequencies,
+                y=magnitude,
+                mode="lines",
+                name="Magnitude",
+                line={"color": "#1f77b4", "width": 1}
+            )
+        ]
+
         peaks = results['low_freq_analysis']['peaks']
         if len(peaks) > 0:
             peak_freqs = [p['frequency'] for p in peaks]
             peak_mags = [p['magnitude'] for p in peaks]
-
-            self.peak_markers = self.plot_widget.plot(
-                peak_freqs,
-                peak_mags,
-                pen=None,
-                symbol='o',
-                symbolBrush='r',
-                symbolSize=8,
-                name='Peaks'
+            traces.append(
+                go.Scatter(
+                    x=peak_freqs,
+                    y=peak_mags,
+                    mode="markers",
+                    name="Peaks",
+                    marker={"color": "#d62728", "size": 8}
+                )
             )
+
+        layout = {
+            "margin": {"l": 60, "r": 20, "t": 20, "b": 45},
+            "plot_bgcolor": "#ffffff",
+            "paper_bgcolor": "#ffffff",
+            "showlegend": True,
+            "xaxis": {
+                "title": "Frequency (Hz)",
+                "showgrid": True,
+                "gridcolor": "#e0e0e0",
+                "zeroline": False
+            },
+            "yaxis": {
+                "title": "Magnitude",
+                "showgrid": True,
+                "gridcolor": "#e0e0e0",
+                "zeroline": False
+            }
+        }
+
+        self.plot_widget.update_plot(traces, layout)
 
     def _update_peaks_table(self, peaks):
         """Update the peaks table."""
