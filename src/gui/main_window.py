@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
         self.channel_config_widget = None
         self.realtime_plot_widget = None
         self.fft_plot_widget = None
+        self.data_analysis_panel = None
         self.filter_config_panel = None
         self.export_panel = None
 
@@ -220,13 +221,6 @@ class MainWindow(QMainWindow):
         self.channel_config_widget = ChannelConfigWidget()
         self.config_tabs.addTab(self.channel_config_widget, "Channels")
         
-        # Filter Configuration tab
-        from .widgets.filter_config_panel import FilterConfigPanel
-        self.filter_config_panel = FilterConfigPanel()
-        self.filter_config_panel.filter_changed.connect(self._on_filter_changed)
-        self.filter_config_panel.filter_enabled.connect(self._on_filter_enabled)
-        self.config_tabs.addTab(self.filter_config_panel, "Filter")
-        
         # Export tab
         from .widgets.export_panel import ExportPanel
         self.export_panel = ExportPanel()
@@ -255,20 +249,24 @@ class MainWindow(QMainWindow):
 
         self.fft_plot_widget = FFTPlotWidget()
         self.fft_plot_widget.fft_size_changed.connect(self._on_fft_size_changed)
+        self.fft_plot_widget.filter_config_updated.connect(self._on_filter_changed)
+        self.fft_plot_widget.filter_enabled_updated.connect(self._on_filter_enabled)
         fft_layout.addWidget(self.fft_plot_widget)
 
         self.plot_tabs.addTab(realtime_tab, "Time Domain")
         self.plot_tabs.addTab(fft_tab, "Frequency Domain")
 
-        # Sync filter config for offline FFT analysis
-        if self.filter_config_panel:
-            filter_config = self.filter_config_panel.get_filter_config()
-            self.fft_plot_widget.set_filter_config(filter_config)
-            self.fft_plot_widget.set_filter_enabled(filter_config.get('enabled', False))
-
         # Add both tab widgets to splitter
         splitter.addWidget(self.config_tabs)  # Left: Config tabs
         splitter.addWidget(self.plot_tabs)    # Right: Plot tabs
+
+        # Data analysis panel (left side, uses existing plot tabs)
+        from .widgets.data_analysis_panel import DataAnalysisPanel
+        self.data_analysis_panel = DataAnalysisPanel(
+            self.realtime_plot_widget,
+            self.fft_plot_widget
+        )
+        self.config_tabs.addTab(self.data_analysis_panel, "Data Analysis")
         
         # Set initial splitter sizes (25% config, 75% plots)
         splitter.setSizes([400, 1200])
@@ -357,18 +355,18 @@ class MainWindow(QMainWindow):
                 pass
 
             # Restore filter settings
+            filter_config = {
+                'type': settings.processing.filter_type,
+                'mode': settings.processing.filter_mode,
+                'cutoff': settings.processing.filter_cutoff,
+                'order': settings.processing.filter_order,
+                'enabled': settings.processing.filter_enabled
+            }
             if self.filter_config_panel:
-                filter_config = {
-                    'type': settings.processing.filter_type,
-                    'mode': settings.processing.filter_mode,
-                    'cutoff': settings.processing.filter_cutoff,
-                    'order': settings.processing.filter_order,
-                    'enabled': settings.processing.filter_enabled
-                }
                 self.filter_config_panel.set_filter_config(filter_config)
-                if self.fft_plot_widget:
-                    self.fft_plot_widget.set_filter_config(filter_config)
-                    self.fft_plot_widget.set_filter_enabled(settings.processing.filter_enabled)
+            if self.fft_plot_widget:
+                self.fft_plot_widget.set_filter_config(filter_config)
+                self.fft_plot_widget.set_filter_enabled(settings.processing.filter_enabled)
 
             self.logger.info("Application settings loaded")
 
@@ -406,11 +404,16 @@ class MainWindow(QMainWindow):
             # Save filter settings
             if self.filter_config_panel:
                 filter_config = self.filter_config_panel.get_filter_config()
-                settings.processing.filter_type = filter_config.get('type', 'butterworth')
-                settings.processing.filter_mode = filter_config.get('mode', 'lowpass')
-                settings.processing.filter_cutoff = filter_config.get('cutoff_low', 1000.0)
-                settings.processing.filter_order = filter_config.get('order', 4)
-                settings.processing.filter_enabled = filter_config.get('enabled', False)
+            elif self.fft_plot_widget:
+                filter_config = self.fft_plot_widget.get_filter_config()
+            else:
+                filter_config = {}
+
+            settings.processing.filter_type = filter_config.get('type', 'butterworth')
+            settings.processing.filter_mode = filter_config.get('mode', 'lowpass')
+            settings.processing.filter_cutoff = filter_config.get('cutoff_low', 1000.0)
+            settings.processing.filter_order = filter_config.get('order', 4)
+            settings.processing.filter_enabled = filter_config.get('enabled', False)
 
             # Save to file
             self.config_manager.save_settings(settings)
@@ -468,7 +471,7 @@ class MainWindow(QMainWindow):
             )
 
             # Connect signal processor to realtime plot
-            self.signal_processor.filtered_data_ready.connect(self.realtime_plot_widget.update_plot)
+            self.signal_processor.filtered_data_ready.connect(self._on_filtered_data_ready)
 
             # Start realtime plot updates
             self.realtime_plot_widget.start()
@@ -599,6 +602,8 @@ class MainWindow(QMainWindow):
         # Update FFT widget with file path
         if self.fft_plot_widget:
             self.fft_plot_widget.set_data_file(filepath)
+        if self.data_analysis_panel:
+            self.data_analysis_panel.set_data_file(filepath)
 
         # Update status bar
         filename = Path(filepath).name
@@ -665,7 +670,27 @@ class MainWindow(QMainWindow):
                 "FFT Size Change Error",
                 f"Failed to change FFT window size:\n{e}"
             )
-    
+
+    @pyqtSlot(object, float)
+    def _on_filtered_data_ready(self, data, timestamp: float):
+        """
+        Update time-domain plot using buffered data based on the selected time window.
+
+        Args:
+            data: Latest filtered data chunk (unused, buffer is queried instead)
+            timestamp: Data timestamp
+        """
+        if self.signal_processor is None or self.realtime_plot_widget is None:
+            return
+
+        try:
+            window_seconds = float(self.realtime_plot_widget.time_window)
+            n_samples = int(window_seconds * self.signal_processor.sample_rate)
+            buffered_data = self.signal_processor.get_filtered_data(n_samples)
+            self.realtime_plot_widget.update_plot(buffered_data, timestamp)
+        except Exception as e:
+            self.logger.error(f"Failed to update time-domain plot: {e}")
+
     def _on_filter_changed(self, config: dict):
         """
         Handle filter configuration change.
@@ -673,6 +698,9 @@ class MainWindow(QMainWindow):
         Args:
             config: Filter configuration dictionary
         """
+        if self.filter_config_panel:
+            self.filter_config_panel.set_filter_config(config)
+
         if self.signal_processor is None:
             return
 

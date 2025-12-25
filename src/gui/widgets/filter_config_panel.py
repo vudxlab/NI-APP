@@ -8,7 +8,8 @@ including filter type, mode, cutoff frequencies, and order.
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
     QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QPushButton,
-    QCheckBox, QTabWidget, QScrollArea
+    QCheckBox, QTabWidget, QScrollArea, QGridLayout, QSpacerItem,
+    QSizePolicy
 )
 from PyQt5.QtCore import pyqtSignal, Qt
 
@@ -75,28 +76,30 @@ class FilterConfigPanel(QWidget):
 
         # Create content widget to hold all groups
         content_widget = QWidget()
-        layout = QVBoxLayout(content_widget)
+        layout = QGridLayout(content_widget)
         layout.setContentsMargins(5, 5, 5, 5)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(8)
 
         # Enable/disable group
         enable_group = self._create_enable_group()
-        layout.addWidget(enable_group)
+        layout.addWidget(enable_group, 0, 0, 1, 2)
 
         # Filter type selection
         type_group = self._create_type_group()
-        layout.addWidget(type_group)
+        layout.addWidget(type_group, 1, 0)
 
         # Filter mode selection
         mode_group = self._create_mode_group()
-        layout.addWidget(mode_group)
+        layout.addWidget(mode_group, 2, 0)
 
         # Cutoff frequency group
         cutoff_group = self._create_cutoff_group()
-        layout.addWidget(cutoff_group)
+        layout.addWidget(cutoff_group, 1, 1)
 
         # Filter order group
         order_group = self._create_order_group()
-        layout.addWidget(order_group)
+        layout.addWidget(order_group, 2, 1)
 
         # Apply button
         apply_layout = QHBoxLayout()
@@ -109,10 +112,16 @@ class FilterConfigPanel(QWidget):
         self.reset_button.clicked.connect(self._on_reset)
         apply_layout.addWidget(self.reset_button)
 
-        layout.addLayout(apply_layout)
+        layout.addLayout(apply_layout, 3, 0, 1, 2)
 
         # Add stretch to push everything to top
-        layout.addStretch()
+        layout.addItem(
+            QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding),
+            4,
+            0,
+            1,
+            2
+        )
 
         # Set content widget to scroll area
         scroll_area.setWidget(content_widget)
@@ -377,22 +386,7 @@ class FilterConfigPanel(QWidget):
 
     def _on_apply(self):
         """Apply filter configuration."""
-        # Update filter config from UI
-        self.filter_config['type'] = self.type_combo.currentData()
-        self.filter_config['mode'] = self.mode_combo.currentData()
-        self.filter_config['cutoff_low'] = self.cutoff_low_spin.value()
-        self.filter_config['cutoff_high'] = self.cutoff_high_spin.value()
-        self.filter_config['order'] = self.order_spin.value()
-
-        # For bandpass/bandstop, use tuple of cutoffs
-        if self.filter_config['mode'] in [ProcessingDefaults.FILTER_MODE_BANDPASS,
-                                           ProcessingDefaults.FILTER_MODE_BANDSTOP]:
-            self.filter_config['cutoff'] = (
-                self.filter_config['cutoff_low'],
-                self.filter_config['cutoff_high']
-            )
-        else:
-            self.filter_config['cutoff'] = self.filter_config['cutoff_low']
+        self.filter_config = self.get_current_ui_config()
 
         self.logger.info(f"Filter applied: {self.filter_config}")
         self.filter_changed.emit(self.filter_config)
@@ -423,6 +417,30 @@ class FilterConfigPanel(QWidget):
         """
         return self.filter_config.copy()
 
+    def get_current_ui_config(self) -> dict:
+        """
+        Build filter configuration from current UI values.
+
+        Returns:
+            Dictionary with filter configuration
+        """
+        config = {
+            'type': self.type_combo.currentData(),
+            'mode': self.mode_combo.currentData(),
+            'cutoff_low': self.cutoff_low_spin.value(),
+            'cutoff_high': self.cutoff_high_spin.value(),
+            'order': self.order_spin.value(),
+            'enabled': self.enable_checkbox.isChecked()
+        }
+
+        if config['mode'] in [ProcessingDefaults.FILTER_MODE_BANDPASS,
+                              ProcessingDefaults.FILTER_MODE_BANDSTOP]:
+            config['cutoff'] = (config['cutoff_low'], config['cutoff_high'])
+        else:
+            config['cutoff'] = config['cutoff_low']
+
+        return config
+
     def set_filter_config(self, config: dict):
         """
         Set filter configuration.
@@ -430,6 +448,7 @@ class FilterConfigPanel(QWidget):
         Args:
             config: Filter configuration dictionary
         """
+        current_enabled = self.filter_config.get('enabled', False)
         self.filter_config = config.copy()
 
         # Block signals during update
@@ -454,7 +473,7 @@ class FilterConfigPanel(QWidget):
                                                         ProcessingDefaults.DEFAULT_LOWPASS_CUTOFF))
             self.cutoff_high_spin.setValue(config.get('cutoff_high', 5000.0))
             self.order_spin.setValue(config.get('order', ProcessingDefaults.DEFAULT_FILTER_ORDER))
-            self.enable_checkbox.setChecked(config.get('enabled', False))
+            self.enable_checkbox.setChecked(config.get('enabled', current_enabled))
 
         finally:
             # Unblock signals

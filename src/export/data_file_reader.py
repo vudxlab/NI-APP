@@ -6,6 +6,7 @@ with support for reading the most recent N seconds of data from growing files.
 """
 
 import numpy as np
+import re
 from typing import Tuple, Dict, Any, Optional
 from pathlib import Path
 
@@ -521,6 +522,15 @@ class DataFileReader:
                         key = key.strip().lower().replace(' ', '_')
                         value = value.strip()
 
+                        numeric_keys = {
+                            'sample_rate',
+                            'duration',
+                            'channels',
+                            'samples',
+                            'n_channels',
+                            'total_samples'
+                        }
+
                         # Try to convert to appropriate type
                         try:
                             if '.' in value:
@@ -528,7 +538,13 @@ class DataFileReader:
                             else:
                                 value = int(value)
                         except ValueError:
-                            pass  # Keep as string
+                            if key in numeric_keys:
+                                num_match = re.search(
+                                    r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?",
+                                    value
+                                )
+                                if num_match:
+                                    value = float(num_match.group(0))
 
                         metadata[key] = value
 

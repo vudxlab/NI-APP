@@ -41,8 +41,8 @@ class NI9234Specs:
 class DAQDefaults:
     """Default DAQ configuration values."""
 
-    # Sample rate (Hz) - 25.6 kHz gives usable bandwidth to ~10 kHz
-    SAMPLE_RATE = 25600
+    # Sample rate (Hz) - default for DAQ tab
+    SAMPLE_RATE = 2048
 
     # Common sample rates for NI-9234
     COMMON_SAMPLE_RATES = [1024, 2048, 4096, 8192, 12800, 25600, 51200]
@@ -171,6 +171,15 @@ class GUIDefaults:
 
     # Plot downsampling threshold (number of points)
     PLOT_DOWNSAMPLE_THRESHOLD = 1000
+
+    # Plot appearance
+    PLOT_BACKGROUND = 'w'
+    PLOT_GRID_ALPHA = 0.25
+    PLOT_AXIS_COLOR = '#4d4d4d'
+    PLOT_AXIS_WIDTH = 1
+    PLOT_FRAME_COLOR = '#9aa3ad'
+    PLOT_FRAME_WIDTH = 1
+    PLOT_LINE_WIDTH = 1
 
     # Color palette for multi-channel plots
     PLOT_COLORS = [

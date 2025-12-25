@@ -98,19 +98,19 @@ class RealtimePlotWidget(QWidget):
         layout.addLayout(controls_layout)
 
         if PYQTGRAPH_AVAILABLE:
+            pg.setConfigOptions(antialias=True)
+
             # Create container for plots (will switch between single plot and GraphicsLayoutWidget)
             self.plot_container = QVBoxLayout()
             
             # Create single plot widget (for overlay mode)
             self.plot_widget = pg.PlotWidget()
-            self.plot_widget.setBackground('w')  # White background
-            self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-            self.plot_widget.setLabel('left', 'Acceleration', units=self.channel_units)
-            self.plot_widget.setLabel('bottom', 'Time', units='s')
+            self.plot_widget.setBackground(GUIDefaults.PLOT_BACKGROUND)
+            plot_item = self.plot_widget.getPlotItem()
+            self._apply_plot_style(plot_item, show_bottom_axis=True)
+            plot_item.setLabel('left', 'Acceleration', units=self.channel_units, color=GUIDefaults.PLOT_AXIS_COLOR)
+            plot_item.setLabel('bottom', 'Time', units='s', color=GUIDefaults.PLOT_AXIS_COLOR)
             self.plot_widget.addLegend()
-
-            # Enable anti-aliasing
-            self.plot_widget.setAntialiasing(True)
 
             self.plot_container.addWidget(self.plot_widget)
             layout.addLayout(self.plot_container)
@@ -120,6 +120,20 @@ class RealtimePlotWidget(QWidget):
             placeholder.setAlignment(Qt.AlignCenter)
             placeholder.setStyleSheet("QLabel { color: red; font-size: 14px; }")
             layout.addWidget(placeholder)
+
+    def _apply_plot_style(self, plot_item: 'pg.PlotItem', show_bottom_axis: bool):
+        plot_item.showGrid(x=True, y=True, alpha=GUIDefaults.PLOT_GRID_ALPHA)
+        plot_item.getViewBox().setBorder(
+            pg.mkPen(GUIDefaults.PLOT_FRAME_COLOR, width=GUIDefaults.PLOT_FRAME_WIDTH)
+        )
+        axis_pen = pg.mkPen(GUIDefaults.PLOT_AXIS_COLOR, width=GUIDefaults.PLOT_AXIS_WIDTH)
+        for axis_name in ("left", "bottom"):
+            axis = plot_item.getAxis(axis_name)
+            axis.setPen(axis_pen)
+            axis.setTextPen(GUIDefaults.PLOT_AXIS_COLOR)
+        bottom_axis = plot_item.getAxis("bottom")
+        bottom_axis.setStyle(showValues=show_bottom_axis)
+        plot_item.showAxis('bottom')
 
     def _create_controls(self) -> QHBoxLayout:
         """Create control panel."""
@@ -219,7 +233,12 @@ class RealtimePlotWidget(QWidget):
 
         # Update plot labels
         if PYQTGRAPH_AVAILABLE:
-            self.plot_widget.setLabel('left', 'Acceleration', units=channel_units)
+            self.plot_widget.setLabel(
+                'left',
+                'Acceleration',
+                units=channel_units,
+                color=GUIDefaults.PLOT_AXIS_COLOR
+            )
 
         self.logger.info(
             f"Plot configured: {n_channels} channels @ {sample_rate} Hz, units={channel_units}"
@@ -246,7 +265,7 @@ class RealtimePlotWidget(QWidget):
 
         for i in range(self.n_channels):
             color = colors[i % len(colors)]
-            pen = pg.mkPen(color=color, width=2)
+            pen = pg.mkPen(color=color, width=GUIDefaults.PLOT_LINE_WIDTH)
 
             curve = self.plot_widget.plot(
                 pen=pen,
@@ -272,27 +291,36 @@ class RealtimePlotWidget(QWidget):
         # Create GraphicsLayoutWidget for multiple subplots
         if self.graphics_layout is None:
             self.graphics_layout = pg.GraphicsLayoutWidget()
-            self.graphics_layout.setBackground('w')
+            self.graphics_layout.setBackground(GUIDefaults.PLOT_BACKGROUND)
         else:
             self.graphics_layout.clear()
         
         colors = GUIDefaults.PLOT_COLORS
         
+        first_plot = None
         for i in range(self.n_channels):
             # Create subplot
             plot = self.graphics_layout.addPlot(row=i, col=0)
-            plot.showGrid(x=True, y=True, alpha=0.3)
-            plot.setLabel('left', self.channel_names[i], units=self.channel_units)
+            self._apply_plot_style(plot, show_bottom_axis=(i == self.n_channels - 1))
+            plot.setLabel(
+                'left',
+                self.channel_names[i],
+                units=self.channel_units,
+                color=GUIDefaults.PLOT_AXIS_COLOR
+            )
             
             # Only show x-axis label on bottom plot
             if i == self.n_channels - 1:
-                plot.setLabel('bottom', 'Time', units='s')
+                plot.setLabel('bottom', 'Time', units='s', color=GUIDefaults.PLOT_AXIS_COLOR)
+
+            if first_plot is None:
+                first_plot = plot
             else:
-                plot.hideAxis('bottom')
+                plot.setXLink(first_plot)
             
             # Create curve for this channel
             color = colors[i % len(colors)]
-            pen = pg.mkPen(color=color, width=2)
+            pen = pg.mkPen(color=color, width=GUIDefaults.PLOT_LINE_WIDTH)
             curve = plot.plot(pen=pen)
             curve.setDownsampling(auto=True)
             curve.setClipToView(True)
@@ -321,7 +349,7 @@ class RealtimePlotWidget(QWidget):
             # Show graphics layout with subplots
             if self.graphics_layout is None:
                 self.graphics_layout = pg.GraphicsLayoutWidget()
-                self.graphics_layout.setBackground('w')
+                self.graphics_layout.setBackground(GUIDefaults.PLOT_BACKGROUND)
             self.plot_container.addWidget(self.graphics_layout)
             self._create_stack_plots()
         
