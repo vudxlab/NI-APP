@@ -360,7 +360,7 @@ def create_default_config(
             channel = ChannelConfig(
                 physical_channel=physical_channel,
                 name=channel_name,
-                enabled=True,
+                enabled=channel_num < 3,
                 input_range=NI9234Specs.INPUT_RANGE_VOLTS,
                 coupling=NI9234Specs.DEFAULT_COUPLING,
                 iepe_enabled=ChannelDefaults.IEPE_ENABLED,

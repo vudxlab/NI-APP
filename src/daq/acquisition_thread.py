@@ -154,7 +154,7 @@ class AcquisitionThread(QThread):
                     self.data_ready.emit(timestamp, raw_data, scaled_data)
 
                     # Auto-save data if enabled
-                    if self.streaming_writer:
+                    if self.streaming_writer and hasattr(self.streaming_writer, '_is_open') and self.streaming_writer._is_open:
                         try:
                             self.streaming_writer.append(scaled_data, timestamp)
                             self.samples_since_flush += scaled_data.shape[1]
@@ -328,10 +328,10 @@ class AcquisitionThread(QThread):
         channel_units = [ch.units for ch in self.config.channels if ch.enabled]
         n_channels = len(channel_names)
 
-        # Create streaming writer
+        # Create streaming writer (locally first to avoid race condition)
         compression_level = self.autosave_config.get('compression_level', 4)
 
-        self.streaming_writer = create_streaming_writer(
+        writer = create_streaming_writer(
             file_format=file_format,
             filepath=str(self.current_save_file),
             n_channels=n_channels,
@@ -341,11 +341,15 @@ class AcquisitionThread(QThread):
             compression_level=compression_level
         )
 
-        # Open the file
-        self.streaming_writer.open()
+        # Open the file BEFORE assigning to self.streaming_writer
+        # This prevents race condition where acquisition thread tries to append before file is open
+        writer.open()
 
         # Reset flush counter
         self.samples_since_flush = 0
+
+        # Now assign to instance variable (atomic operation)
+        self.streaming_writer = writer
 
         # Emit signal
         self.save_file_created.emit(str(self.current_save_file))
@@ -392,6 +396,49 @@ class AcquisitionThread(QThread):
         """Resume data acquisition after pause."""
         self.logger.info("Resume requested for acquisition thread")
         self._pause_requested = False
+
+    def start_saving(self, save_config: dict):
+        """
+        Start continuous data saving to file.
+
+        Args:
+            save_config: Dictionary with save settings (location, format, prefix, compression)
+        """
+        if self.streaming_writer is not None:
+            self.logger.warning("Streaming writer already active")
+            return
+
+        try:
+            # Update autosave config with new settings
+            self.autosave_config = save_config.copy()
+            self.autosave_config['enabled'] = True
+
+            # Initialize streaming writer
+            self._init_streaming_writer()
+            self.logger.info("Started continuous data saving")
+
+        except Exception as e:
+            error_msg = f"Failed to start saving: {e}"
+            self.logger.error(error_msg)
+            self.save_error.emit(error_msg)
+
+    def stop_saving(self):
+        """Stop continuous data saving and close file."""
+        if self.streaming_writer is None:
+            self.logger.warning("No streaming writer active")
+            return
+
+        try:
+            self._close_streaming_writer()
+            self.logger.info("Stopped continuous data saving")
+        except Exception as e:
+            error_msg = f"Failed to stop saving: {e}"
+            self.logger.error(error_msg)
+            self.save_error.emit(error_msg)
+
+    def is_saving(self) -> bool:
+        """Check if currently saving data to file."""
+        return self.streaming_writer is not None
 
     def is_running(self) -> bool:
         """

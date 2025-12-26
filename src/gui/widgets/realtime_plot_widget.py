@@ -8,7 +8,7 @@ acceleration data using Plotly.
 import numpy as np
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QComboBox,
-    QCheckBox, QPushButton, QLabel, QSpinBox, QMenu, QAction
+    QCheckBox, QPushButton, QLabel, QSpinBox, QMenu, QAction, QScrollArea
 )
 from PyQt5.QtCore import QTimer, pyqtSlot, Qt
 from typing import List, Dict, Optional
@@ -62,9 +62,20 @@ class RealtimePlotWidget(QWidget):
 
         # Plot data cache
         self.channel_visible: List[bool] = []
-        
-        # Plot view (Plotly)
-        self.plot_view: Optional['PlotlyView'] = None
+
+        # Plot view (Plotly) - support both overlay and stack modes
+        self.plot_view_single: Optional['PlotlyView'] = None  # For overlay mode
+        self.plot_views_stack: List['PlotlyView'] = []  # For stack mode (1 per channel)
+        self.plot_container_stack: Optional[QWidget] = None  # Container for stack plots
+        self.scroll_area: Optional[QScrollArea] = None
+
+        # Stack plot settings
+        self.max_visible_channels = 4  # Max channels to show without scrolling
+        self.subplot_height = 200  # Fixed height per individual plot in pixels
+        self.min_subplot_height = 160  # Minimum height for stack plots
+        self._last_layout: Optional[Dict] = None  # Cache last layout (deprecated for stack mode)
+        self._current_plot_height: Optional[int] = None  # Track current height (deprecated for stack mode)
+        self._layout_initialized: bool = False  # Track if layout is set (deprecated for stack mode)
 
         # Update rate limiting
         self.update_timer = QTimer()
@@ -98,8 +109,17 @@ class RealtimePlotWidget(QWidget):
         layout.addLayout(controls_layout)
 
         if PLOTLY_AVAILABLE:
-            self.plot_view = PlotlyView()
-            layout.addWidget(self.plot_view)
+            # Create scroll area for plot view
+            self.scroll_area = QScrollArea()
+            self.scroll_area.setWidgetResizable(True)
+            self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+            # Initialize with overlay mode (single plot view)
+            self.plot_view_single = PlotlyView()
+            self.scroll_area.setWidget(self.plot_view_single)
+            layout.addWidget(self.scroll_area)
+
             # Initial empty plot will be set after widget is shown
             # to ensure proper rendering. Increase delay to 500ms for Plotly.js to load
             print("RealtimePlotWidget: Scheduling _init_empty_plot in 500ms")
@@ -203,9 +223,23 @@ class RealtimePlotWidget(QWidget):
         # Initialize visibility
         self.channel_visible = [True] * n_channels
 
-        # Trigger a redraw on next update
+        # Reset cached plot data
+        self.time_data = None
+        self.plot_data = None
+
+        # Reset layout cache (deprecated for stack mode)
+        self._last_layout = None
+        self._layout_initialized = False
+        self._current_plot_height = None
+
+        # Rebuild stack container if in stack mode
         if PLOTLY_AVAILABLE:
-            self._rebuild_plots()
+            if self.display_mode == "stack":
+                # Recreate stack container with new number of channels
+                self._create_stack_plot_container()
+            else:
+                # Just trigger a redraw for overlay mode
+                self._rebuild_plots()
 
         self.logger.info(
             f"Plot configured: {n_channels} channels @ {sample_rate} Hz, units={channel_units}"
@@ -253,9 +287,9 @@ class RealtimePlotWidget(QWidget):
     def _init_empty_plot(self):
         """Initialize empty plot after widget is visible."""
         print("RealtimePlotWidget._init_empty_plot: Called")
-        if PLOTLY_AVAILABLE and self.plot_view is not None:
-            print(f"RealtimePlotWidget._init_empty_plot: Calling update_plot, view size={self.plot_view.size()}")
-            self.plot_view.update_plot(
+        if PLOTLY_AVAILABLE and self.plot_view_single is not None:
+            print(f"RealtimePlotWidget._init_empty_plot: Calling update_plot, view size={self.plot_view_single.size()}")
+            self.plot_view_single.update_plot(
                 [],
                 self._base_layout(
                     y_title=f"Acceleration ({self.channel_units})",
@@ -265,7 +299,7 @@ class RealtimePlotWidget(QWidget):
             )
             print("RealtimePlotWidget._init_empty_plot: update_plot called")
         else:
-            print(f"RealtimePlotWidget._init_empty_plot: Skipped, PLOTLY_AVAILABLE={PLOTLY_AVAILABLE}, plot_view={self.plot_view}")
+            print(f"RealtimePlotWidget._init_empty_plot: Skipped, PLOTLY_AVAILABLE={PLOTLY_AVAILABLE}, plot_view_single={self.plot_view_single}")
     
     def _rebuild_plots(self):
         """Rebuild plots when switching between overlay and stack modes."""
@@ -273,8 +307,93 @@ class RealtimePlotWidget(QWidget):
             return
         if self._pending_data is not None:
             self._update_plots()
+            return
+
+        if self.plot_data is not None:
+            data = self.plot_data
+            n_samples = data.shape[1]
+            if self.time_data is not None and len(self.time_data) == n_samples:
+                time_axis = self.time_data
+            else:
+                time_axis = np.arange(n_samples) / self.sample_rate
+                time_axis = time_axis - time_axis[-1]
+
+            if self.display_mode == "overlay":
+                self._update_overlay_plots(time_axis, data, n_samples)
+            else:
+                self._update_stack_plots(time_axis, data, n_samples)
 
         self.logger.info(f"Rebuilt plots in {self.display_mode} mode")
+
+    def _create_stack_plot_container(self):
+        """Create container with individual PlotlyView widgets for stack mode."""
+        if not PLOTLY_AVAILABLE:
+            return
+
+        # Destroy any existing stack container
+        self._destroy_stack_plot_container()
+
+        # Create container widget
+        self.plot_container_stack = QWidget()
+        container_layout = QVBoxLayout(self.plot_container_stack)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(2)  # Minimal spacing between plots
+
+        # Create PlotlyView for each channel
+        self.plot_views_stack = []
+        for i in range(self.n_channels):
+            plot_view = PlotlyView()
+            plot_view.setFixedHeight(self.subplot_height)
+            plot_view.setMinimumWidth(400)
+
+            # Add to container
+            container_layout.addWidget(plot_view)
+            self.plot_views_stack.append(plot_view)
+
+            # Initialize with empty plot
+            channel_name = self.channel_names[i] if i < len(self.channel_names) else f"Channel {i+1}"
+            QTimer.singleShot(
+                500 + i * 100,  # Stagger initialization to avoid overload
+                lambda view=plot_view, name=channel_name: self._init_stack_plot_view(view, name)
+            )
+
+        # Add stretch at the end to push plots to top
+        container_layout.addStretch()
+
+        # Set container to scroll area
+        self.scroll_area.setWidget(self.plot_container_stack)
+        self._update_stack_plot_heights()
+
+        self.logger.info(f"Created stack plot container with {self.n_channels} PlotlyView widgets")
+
+    def _destroy_stack_plot_container(self):
+        """Destroy stack plot container and clean up PlotlyView widgets."""
+        # Stop updates first to prevent crashes
+        was_active = self.update_timer.isActive()
+        if was_active:
+            self.update_timer.stop()
+
+        if self.plot_views_stack:
+            # Clear and delete all PlotlyView widgets
+            for plot_view in self.plot_views_stack:
+                try:
+                    plot_view.deleteLater()
+                except Exception as e:
+                    self.logger.warning(f"Error deleting PlotlyView: {e}")
+            self.plot_views_stack = []
+            self.logger.debug("Destroyed all stack PlotlyView widgets")
+
+        if self.plot_container_stack is not None:
+            try:
+                self.plot_container_stack.deleteLater()
+            except Exception as e:
+                self.logger.warning(f"Error deleting container: {e}")
+            self.plot_container_stack = None
+            self.logger.debug("Destroyed stack plot container")
+
+        # Restart timer if it was active
+        if was_active:
+            self.update_timer.start()
 
     @pyqtSlot(np.ndarray, float)
     def update_plot(self, data: np.ndarray, timestamp: float):
@@ -288,6 +407,7 @@ class RealtimePlotWidget(QWidget):
         # Store pending data (will be plotted in timer callback)
         self._pending_data = data
         self._pending_timestamp = timestamp
+        self.plot_data = data
 
         # Start update timer if not running
         if not self.update_timer.isActive():
@@ -313,6 +433,10 @@ class RealtimePlotWidget(QWidget):
             time_axis = np.arange(n_samples) / self.sample_rate
             time_axis = time_axis - time_axis[-1]  # Make latest sample = 0
 
+            # Cache data for redraws (mode switch, refresh)
+            self.plot_data = data
+            self.time_data = time_axis
+
             # Update curves based on display mode
             if self.display_mode == "overlay":
                 self._update_overlay_plots(time_axis, data, n_samples)
@@ -327,8 +451,13 @@ class RealtimePlotWidget(QWidget):
     
     def _update_overlay_plots(self, time_axis: np.ndarray, data: np.ndarray, n_samples: int):
         """Update plots in overlay mode (single plot with all channels)."""
-        if not PLOTLY_AVAILABLE or self.plot_view is None:
+        if not PLOTLY_AVAILABLE or self.plot_view_single is None:
             return
+
+        # Reset plot view size for overlay mode
+        if self.plot_view_single:
+            self.plot_view_single.setMinimumHeight(300)
+            self.plot_view_single.setMaximumHeight(16777215)  # Qt default max
 
         colors = GUIDefaults.PLOT_COLORS
         traces = []
@@ -361,44 +490,50 @@ class RealtimePlotWidget(QWidget):
             x_title="Time (s)",
             show_legend=True
         )
-        self.plot_view.update_plot(traces, layout)
+        self.plot_view_single.update_plot(traces, layout)
     
     def _update_stack_plots(self, time_axis: np.ndarray, data: np.ndarray, n_samples: int):
-        """Update plots in stack mode (separate subplot for each channel)."""
-        print(f"_update_stack_plots: Called with n_channels={self.n_channels}, data.shape={data.shape}, n_samples={n_samples}")
-
-        if not PLOTLY_AVAILABLE or self.plot_view is None:
-            print(f"_update_stack_plots: Skipping - PLOTLY_AVAILABLE={PLOTLY_AVAILABLE}, plot_view={self.plot_view}")
+        """Update plots in stack mode (separate PlotlyView for each channel)."""
+        if not PLOTLY_AVAILABLE:
             return
 
-        # Count visible channels
-        visible_count = sum(1 for i in range(min(self.n_channels, len(self.channel_visible)))
-                           if self.channel_visible[i] and i < data.shape[0])
-
-        print(f"_update_stack_plots: visible_count={visible_count}, channel_visible={self.channel_visible}")
-
-        if visible_count == 0:
-            print("_update_stack_plots: No visible channels, returning")
+        # If stack views not created yet, skip this update
+        if not self.plot_views_stack:
+            self.logger.debug("Stack plot views not ready yet, skipping update")
             return
 
-        # Create subplots with proper spacing
-        fig = make_subplots(
-            rows=self.n_channels,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.05,
-            subplot_titles=[self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}"
-                          for i in range(self.n_channels)]
-        )
+        # Ensure we have the correct number of PlotlyView widgets
+        if len(self.plot_views_stack) != self.n_channels:
+            self.logger.warning(f"Mismatch: {len(self.plot_views_stack)} views vs {self.n_channels} channels.")
+            # Don't recreate during update - just skip this update
+            # Container will be recreated by configure() or mode change
+            return
 
+        # Update each PlotlyView individually
         colors = GUIDefaults.PLOT_COLORS
-
         for i in range(self.n_channels):
+            # Skip hidden channels
             if i < len(self.channel_visible) and not self.channel_visible[i]:
+                # Clear the plot for hidden channels
+                layout = self._base_layout(
+                    y_title=f"{self.channel_units}",
+                    x_title="Time (s)",
+                    show_legend=False
+                )
+                channel_name = self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}"
+                layout["title"] = {
+                    "text": f"<b>{channel_name}</b>",
+                    "font": {"size": 14, "color": "#111"},
+                    "x": 0.01,
+                    "xanchor": "left"
+                }
+                self.plot_views_stack[i].update_plot([], layout)
                 continue
+
             if i >= data.shape[0]:
                 continue
 
+            # Downsample if needed
             if n_samples > self.downsample_threshold:
                 step = max(1, n_samples // self.downsample_threshold)
                 x_vals = time_axis[::step]
@@ -407,75 +542,49 @@ class RealtimePlotWidget(QWidget):
                 x_vals = time_axis
                 y_vals = data[i, :]
 
-            print(f"_update_stack_plots: Adding trace {i}: x_vals.shape={x_vals.shape}, y_vals.shape={y_vals.shape}, time_axis.shape={time_axis.shape}")
-
-            # CRITICAL FIX: Convert numpy arrays to Python lists
-            # fig.to_dict() has a bug with numpy arrays in subplots - it loses data
-            x_list = x_vals.tolist() if hasattr(x_vals, 'tolist') else list(x_vals)
-            y_list = y_vals.tolist() if hasattr(y_vals, 'tolist') else list(y_vals)
-
-            fig.add_trace(
-                go.Scatter(
-                    x=x_list,  # ← Use Python list instead of numpy array
-                    y=y_list,  # ← Use Python list instead of numpy array
-                    mode="lines",
-                    name=self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}",
-                    line={"color": colors[i % len(colors)], "width": GUIDefaults.PLOT_LINE_WIDTH},
-                    showlegend=False
-                ),
-                row=i + 1,
-                col=1
+            # Create single trace for this channel
+            trace = go.Scatter(
+                x=x_vals,
+                y=y_vals,
+                mode="lines",
+                name=self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}",
+                line={"color": colors[i % len(colors)], "width": GUIDefaults.PLOT_LINE_WIDTH}
             )
 
-            # Update y-axis for this subplot
-            fig.update_yaxes(
-                title_text=f"{self.channel_units}",
-                showgrid=True,
-                gridcolor="#e0e0e0",
-                zeroline=False,
-                automargin=True,
-                row=i + 1,
-                col=1
-            )
+            # Create layout for this individual plot
+            # Show x-axis label on all plots for better clarity
+            layout = {
+                "autosize": True,
+                "margin": {"l": 60, "r": 20, "t": 30, "b": 40},
+                "plot_bgcolor": self._plotly_background(),
+                "paper_bgcolor": self._plotly_background(),
+                "showlegend": False,
+                "title": {
+                    "text": f"<b>{self.channel_names[i] if i < len(self.channel_names) else f'Ch{i+1}'}</b>",
+                    "font": {"size": 14, "color": "#111"},
+                    "x": 0.01,
+                    "xanchor": "left"
+                },
+                "xaxis": {
+                    "title": "Time (s)",  # Show on all plots
+                    "showgrid": True,
+                    "gridcolor": "#e0e0e0",
+                    "zeroline": False,
+                    "automargin": True,
+                    "showticklabels": True  # Always show tick labels
+                },
+                "yaxis": {
+                    "title": f"{self.channel_units}",
+                    "showgrid": True,
+                    "gridcolor": "#e0e0e0",
+                    "zeroline": False,
+                    "automargin": True
+                },
+                "uirevision": f"channel_{i}"  # Keep zoom/pan state per channel
+            }
 
-        # Update x-axis only for bottom subplot
-        fig.update_xaxes(
-            title_text="Time (s)",
-            showgrid=True,
-            gridcolor="#e0e0e0",
-            zeroline=False,
-            automargin=True,
-            row=self.n_channels,
-            col=1
-        )
-
-        # Calculate appropriate height (min 150px per subplot)
-        plot_height = max(400, self.n_channels * 150)
-
-        print(f"_update_stack_plots: Creating layout with height={plot_height}")
-
-        fig.update_layout(
-            height=plot_height,
-            margin={"l": 60, "r": 20, "t": 40, "b": 45},
-            plot_bgcolor=self._plotly_background(),
-            paper_bgcolor=self._plotly_background(),
-            showlegend=False
-        )
-
-        fig_dict = fig.to_dict()
-
-        print(f"_update_stack_plots: fig_dict has {len(fig_dict['data'])} traces")
-        print(f"_update_stack_plots: Layout height={fig_dict['layout'].get('height', 'NOT SET')}")
-
-        # Debug: Check axes in layout
-        layout_axes = [key for key in fig_dict['layout'].keys() if key.startswith('xaxis') or key.startswith('yaxis')]
-        print(f"_update_stack_plots: Layout has axes: {layout_axes[:10]}...")  # Print first 10
-
-        # Debug: Print trace axis assignments
-        for i, trace in enumerate(fig_dict['data'][:3]):  # First 3 traces
-            print(f"_update_stack_plots: Trace {i} - xaxis={trace.get('xaxis', 'NOT SET')}, yaxis={trace.get('yaxis', 'NOT SET')}, x_len={len(trace.get('x', []))}, y_len={len(trace.get('y', []))}")
-
-        self.plot_view.update_plot(fig_dict["data"], fig_dict["layout"])
+            # Update this specific PlotlyView
+            self.plot_views_stack[i].update_plot([trace], layout)
 
     def _on_window_changed(self, index: int):
         """Handle time window change."""
@@ -498,23 +607,82 @@ class RealtimePlotWidget(QWidget):
         """Handle display mode change (overlay/stack)."""
         old_mode = self.display_mode
         self.display_mode = self.display_mode_combo.currentData()
-        self.logger.debug(f"Display mode changed to: {self.display_mode}")
-        
-        # Rebuild plots if mode changed
+        self.logger.debug(f"Display mode changing from {old_mode} to {self.display_mode}")
+
+        # Switch between overlay and stack modes
         if old_mode != self.display_mode and self.n_channels > 0:
-            self._rebuild_plots()
+            # Stop timer during mode switch to prevent crashes
+            was_active = self.update_timer.isActive()
+            if was_active:
+                self.update_timer.stop()
+
+            try:
+                if self.display_mode == "stack":
+                    # Switching to stack mode: create individual plot views
+                    self.logger.info("Switching to stack mode: creating individual PlotlyView widgets")
+
+                    # Destroy single plot view if it exists
+                    if self.plot_view_single is not None:
+                        self.plot_view_single.deleteLater()
+                        self.plot_view_single = None
+
+                    # Create stack plot container
+                    self._create_stack_plot_container()
+                    self._update_stack_plot_heights()
+
+                else:  # overlay mode
+                    # Switching to overlay mode: use single plot view
+                    self.logger.info("Switching to overlay mode: creating single PlotlyView widget")
+
+                    # Destroy stack plot container (timer already stopped above)
+                    self._destroy_stack_plot_container()
+
+                    # Create single plot view
+                    self.plot_view_single = PlotlyView()
+                    self.plot_view_single.setMinimumHeight(300)
+                    self.scroll_area.setWidget(self.plot_view_single)
+
+                    # Initialize with empty plot
+                    QTimer.singleShot(500, self._init_empty_plot)
+
+                # Trigger redraw with pending data if available
+                self._rebuild_plots()
+
+            finally:
+                # Restart timer if it was active
+                if was_active:
+                    self.update_timer.start()
+
         self.logger.debug(f"Display mode changed to {self.display_mode}")
 
     def _on_clear(self):
         """Clear the plot."""
-        if not PLOTLY_AVAILABLE or self.plot_view is None:
+        if not PLOTLY_AVAILABLE:
             return
 
-        self.plot_view.update_plot([], self._base_layout(
-            y_title=f"Acceleration ({self.channel_units})",
-            x_title="Time (s)",
-            show_legend=True
-        ))
+        if self.display_mode == "overlay" and self.plot_view_single is not None:
+            # Clear single overlay plot
+            self.plot_view_single.update_plot([], self._base_layout(
+                y_title=f"Acceleration ({self.channel_units})",
+                x_title="Time (s)",
+                show_legend=True
+            ))
+        elif self.display_mode == "stack" and self.plot_views_stack:
+            # Clear all stack plots
+            for i, plot_view in enumerate(self.plot_views_stack):
+                channel_name = self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}"
+                layout = self._base_layout(
+                    y_title=f"{self.channel_units}",
+                    x_title="Time (s)",
+                    show_legend=False
+                )
+                layout["title"] = {
+                    "text": f"<b>{channel_name}</b>",
+                    "font": {"size": 14, "color": "#111"},
+                    "x": 0.01,
+                    "xanchor": "left"
+                }
+                plot_view.update_plot([], layout)
 
         self.logger.debug("Plot cleared")
 
@@ -528,6 +696,8 @@ class RealtimePlotWidget(QWidget):
         """
         if 0 <= channel_idx < len(self.channel_visible):
             self.channel_visible[channel_idx] = visible
+            if self.display_mode == "stack":
+                self._update_stack_plot_heights()
 
     def show_all_channels(self):
         """Show all channels."""
@@ -555,6 +725,12 @@ class RealtimePlotWidget(QWidget):
         """Handle widget close event."""
         self.stop()
         event.accept()
+
+    def resizeEvent(self, event):
+        """Handle resize events to keep stack plots sized to the window."""
+        super().resizeEvent(event)
+        if self.display_mode == "stack":
+            self._update_stack_plot_heights()
     
     def contextMenuEvent(self, event):
         """Handle right-click context menu."""
@@ -607,6 +783,40 @@ class RealtimePlotWidget(QWidget):
         
         # Show menu at cursor position
         menu.exec_(event.globalPos())
+
+    def _init_stack_plot_view(self, view: 'PlotlyView', channel_name: str):
+        """Initialize a stack plot view with empty content if no data is ready."""
+        if self.plot_data is not None or self._pending_data is not None:
+            return
+        layout = self._base_layout(
+            y_title=f"{self.channel_units}",
+            x_title="Time (s)",
+            show_legend=False
+        )
+        layout["title"] = {
+            "text": f"<b>{channel_name}</b>",
+            "font": {"size": 14, "color": "#111"},
+            "x": 0.01,
+            "xanchor": "left"
+        }
+        view.update_plot([], layout)
+
+    def _update_stack_plot_heights(self):
+        """Resize stack plots to fit available space when few channels are visible."""
+        if not self.plot_views_stack or not self.scroll_area:
+            return
+
+        visible_count = sum(1 for visible in self.channel_visible if visible)
+        if visible_count <= 0:
+            visible_count = self.n_channels
+
+        target_height = self.subplot_height
+        viewport_height = self.scroll_area.viewport().height()
+        if visible_count <= self.max_visible_channels and viewport_height > 0:
+            target_height = max(self.min_subplot_height, int(viewport_height / max(1, visible_count)))
+
+        for plot_view in self.plot_views_stack:
+            plot_view.setFixedHeight(target_height)
     
     def _set_display_mode(self, mode: str):
         """Set display mode and update UI."""

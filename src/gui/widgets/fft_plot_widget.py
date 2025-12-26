@@ -9,7 +9,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QComboBox,
     QCheckBox, QPushButton, QLabel, QSpinBox, QDoubleSpinBox, QMenu, QAction,
-    QMessageBox, QDialog, QDialogButtonBox
+    QMessageBox, QDialog, QDialogButtonBox, QScrollArea
 )
 from PyQt5.QtCore import QTimer, pyqtSlot, pyqtSignal, Qt, QThread, QObject
 from typing import List, Dict, Optional, Tuple, Union
@@ -70,8 +70,11 @@ class FFTPlotWidget(QWidget):
         self.magnitudes: Optional[np.ndarray] = None
         self.peaks: List[Dict] = []
 
-        # Plot view (Plotly)
-        self.plot_view: Optional['PlotlyView'] = None
+        # Plot view (Plotly) - support both overlay and stack modes
+        self.plot_view_single: Optional['PlotlyView'] = None  # For overlay mode
+        self.plot_views_stack: List['PlotlyView'] = []  # For stack mode (1 per channel)
+        self.plot_container_stack: Optional[QWidget] = None  # Container for stack plots
+        self.scroll_area: Optional['QScrollArea'] = None
         self.channel_visible: List[bool] = []
 
         # Display settings
@@ -82,6 +85,14 @@ class FFTPlotWidget(QWidget):
         self.frequency_limit = "Full"  # "Full" or specific Hz value
         self.display_mode = "overlay"  # "overlay" or "stack"
         self.stack_offset = 20.0  # dB offset between stacked channels
+
+        # Stack plot settings
+        self.max_visible_channels = 4  # Max channels to show without scrolling
+        self.subplot_height = 200  # Fixed height per individual plot in pixels
+        self.min_subplot_height = 160  # Minimum height for stack plots
+        self._last_layout: Optional[Dict] = None  # Cache last layout (deprecated for stack mode)
+        self._current_plot_height: Optional[int] = None  # Track current height (deprecated for stack mode)
+        self._layout_initialized: bool = False  # Track if layout is set (deprecated for stack mode)
 
         # File-based FFT settings
         self.current_data_file: Optional[Path] = None
@@ -106,8 +117,17 @@ class FFTPlotWidget(QWidget):
         layout.addLayout(controls_layout)
 
         if PLOTLY_AVAILABLE:
-            self.plot_view = PlotlyView()
-            layout.addWidget(self.plot_view)
+            # Create scroll area for plot view
+            self.scroll_area = QScrollArea()
+            self.scroll_area.setWidgetResizable(True)
+            self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+            # Initialize with overlay mode (single plot view)
+            self.plot_view_single = PlotlyView()
+            self.scroll_area.setWidget(self.plot_view_single)
+            layout.addWidget(self.scroll_area)
+
             # Initial empty plot will be set after widget is shown
             # to ensure proper rendering. Increase delay to 500ms for Plotly.js to load
             print("FFTPlotWidget: Scheduling _init_empty_plot in 500ms")
@@ -286,8 +306,14 @@ class FFTPlotWidget(QWidget):
         # Initialize visibility
         self.channel_visible = [True] * n_channels
 
+        # Rebuild stack container if in stack mode
         if PLOTLY_AVAILABLE:
-            self._rebuild_plots()
+            if self.display_mode == "stack":
+                # Recreate stack container with new number of channels
+                self._create_stack_plot_container()
+            else:
+                # Just trigger a redraw for overlay mode
+                self._rebuild_plots()
 
         # Initialize long-window FFT processor
         self.long_fft_processor = LongWindowFFTProcessor(
@@ -748,9 +774,9 @@ class FFTPlotWidget(QWidget):
     def _init_empty_plot(self):
         """Initialize empty plot after widget is visible."""
         print("FFTPlotWidget._init_empty_plot: Called")
-        if PLOTLY_AVAILABLE and self.plot_view is not None:
-            print(f"FFTPlotWidget._init_empty_plot: Calling update_plot, view size={self.plot_view.size()}")
-            self.plot_view.update_plot(
+        if PLOTLY_AVAILABLE and self.plot_view_single is not None:
+            print(f"FFTPlotWidget._init_empty_plot: Calling update_plot, view size={self.plot_view_single.size()}")
+            self.plot_view_single.update_plot(
                 [],
                 self._base_layout(
                     y_title=f"Magnitude ({self._get_magnitude_unit()})",
@@ -760,7 +786,7 @@ class FFTPlotWidget(QWidget):
             )
             print("FFTPlotWidget._init_empty_plot: update_plot called")
         else:
-            print(f"FFTPlotWidget._init_empty_plot: Skipped, PLOTLY_AVAILABLE={PLOTLY_AVAILABLE}, plot_view={self.plot_view}")
+            print(f"FFTPlotWidget._init_empty_plot: Skipped, PLOTLY_AVAILABLE={PLOTLY_AVAILABLE}, plot_view_single={self.plot_view_single}")
     
     def _rebuild_plots(self):
         """Rebuild plots when switching between overlay and stack modes."""
@@ -774,6 +800,91 @@ class FFTPlotWidget(QWidget):
                 self._update_stack_plots()
 
         self.logger.info(f"Rebuilt FFT plots in {self.display_mode} mode")
+
+    def _create_stack_plot_container(self):
+        """Create container with individual PlotlyView widgets for stack mode."""
+        if not PLOTLY_AVAILABLE:
+            return
+
+        # Destroy any existing stack container
+        self._destroy_stack_plot_container()
+
+        # Create container widget
+        self.plot_container_stack = QWidget()
+        container_layout = QVBoxLayout(self.plot_container_stack)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(2)  # Minimal spacing between plots
+
+        # Create PlotlyView for each channel
+        self.plot_views_stack = []
+        for i in range(self.n_channels):
+            plot_view = PlotlyView()
+            plot_view.setFixedHeight(self.subplot_height)
+            plot_view.setMinimumWidth(400)
+
+            # Add to container
+            container_layout.addWidget(plot_view)
+            self.plot_views_stack.append(plot_view)
+
+            # Initialize with empty plot
+            channel_name = self.channel_names[i] if i < len(self.channel_names) else f"Channel {i+1}"
+            QTimer.singleShot(
+                500 + i * 100,  # Stagger initialization to avoid overload
+                lambda view=plot_view, name=channel_name: view.update_plot(
+                    [],
+                    self._base_layout(
+                        y_title=f"{self._get_magnitude_unit()}",
+                        x_title="Frequency (Hz)",
+                        show_legend=False
+                    )
+                )
+            )
+
+        # Add stretch at the end to push plots to top
+        container_layout.addStretch()
+
+        # Set container to scroll area
+        self.scroll_area.setWidget(self.plot_container_stack)
+        self._update_stack_plot_heights()
+
+        self.logger.info(f"Created FFT stack plot container with {self.n_channels} PlotlyView widgets")
+
+    def _destroy_stack_plot_container(self):
+        """Destroy stack plot container and clean up PlotlyView widgets."""
+        if self.plot_views_stack:
+            # Clear and delete all PlotlyView widgets
+            for plot_view in self.plot_views_stack:
+                try:
+                    plot_view.deleteLater()
+                except Exception as e:
+                    self.logger.warning(f"Error deleting FFT PlotlyView: {e}")
+            self.plot_views_stack = []
+            self.logger.debug("Destroyed all FFT stack PlotlyView widgets")
+
+        if self.plot_container_stack is not None:
+            try:
+                self.plot_container_stack.deleteLater()
+            except Exception as e:
+                self.logger.warning(f"Error deleting FFT container: {e}")
+            self.plot_container_stack = None
+            self.logger.debug("Destroyed FFT stack plot container")
+
+    def _update_stack_plot_heights(self):
+        """Resize stack plots to fit available space when few channels are visible."""
+        if not self.plot_views_stack or not self.scroll_area:
+            return
+
+        visible_count = sum(1 for visible in self.channel_visible if visible)
+        if visible_count <= 0:
+            visible_count = self.n_channels
+
+        target_height = self.subplot_height
+        viewport_height = self.scroll_area.viewport().height()
+        if visible_count <= self.max_visible_channels and viewport_height > 0:
+            target_height = max(self.min_subplot_height, int(viewport_height / max(1, visible_count)))
+
+        for plot_view in self.plot_views_stack:
+            plot_view.setFixedHeight(target_height)
 
     @pyqtSlot(np.ndarray, np.ndarray, int)
     def update_plot(self, frequencies: np.ndarray, magnitude: np.ndarray, channel: int):
@@ -804,7 +915,7 @@ class FFTPlotWidget(QWidget):
         """Update plots in overlay mode (single plot with all channels)."""
         if self.frequencies is None or self.magnitudes is None:
             return
-        if not PLOTLY_AVAILABLE or self.plot_view is None:
+        if not PLOTLY_AVAILABLE or self.plot_view_single is None:
             return
 
         colors = GUIDefaults.PLOT_COLORS
@@ -866,43 +977,41 @@ class FFTPlotWidget(QWidget):
         )
         if self.frequency_limit != "Full":
             layout["xaxis"]["range"] = [0, float(self.frequency_limit)]
-        self.plot_view.update_plot(traces, layout)
+        self.plot_view_single.update_plot(traces, layout)
 
     def _update_stack_plots(self):
-        """Update plots in stack mode (separate subplot for each channel)."""
+        """Update plots in stack mode (separate PlotlyView for each channel)."""
         if self.frequencies is None or self.magnitudes is None:
             return
-        if not PLOTLY_AVAILABLE or self.plot_view is None:
+        if not PLOTLY_AVAILABLE or not self.plot_views_stack:
             return
 
-        # Count visible channels
-        visible_count = sum(1 for i in range(min(self.n_channels, len(self.channel_visible)))
-                           if self.channel_visible[i] and i < len(self.magnitudes))
-
-        if visible_count == 0:
+        # Ensure we have the correct number of PlotlyView widgets
+        if len(self.plot_views_stack) != self.n_channels:
+            self.logger.warning(f"Mismatch: {len(self.plot_views_stack)} views vs {self.n_channels} channels. Recreating container.")
+            self._create_stack_plot_container()
             return
 
-        # Create subplots with proper spacing
-        fig = make_subplots(
-            rows=self.n_channels,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.05,
-            subplot_titles=[self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}"
-                          for i in range(self.n_channels)]
-        )
-
+        # Update each PlotlyView individually
         colors = GUIDefaults.PLOT_COLORS
-
         for channel in range(self.n_channels):
-            if channel >= len(self.magnitudes):
-                continue
+            # Skip hidden channels
             if channel < len(self.channel_visible) and not self.channel_visible[channel]:
+                # Clear the plot for hidden channels
+                self.plot_views_stack[channel].update_plot([], self._base_layout(
+                    y_title=f"{self._get_magnitude_unit()}",
+                    x_title="Frequency (Hz)" if channel == self.n_channels - 1 else "",
+                    show_legend=False
+                ))
+                continue
+
+            if channel >= len(self.magnitudes):
                 continue
 
             freq = self.frequencies
             mag = self.magnitudes[channel]
 
+            # Apply frequency limit if set
             if self.frequency_limit != "Full":
                 max_freq = float(self.frequency_limit)
                 mask = freq <= max_freq
@@ -912,24 +1021,18 @@ class FFTPlotWidget(QWidget):
                 freq_plot = freq
                 mag_plot = mag.copy()
 
-            # CRITICAL FIX: Convert numpy arrays to Python lists
-            # fig.to_dict() has a bug with numpy arrays in subplots - it loses data
-            freq_list = freq_plot.tolist() if hasattr(freq_plot, 'tolist') else list(freq_plot)
-            mag_list = mag_plot.tolist() if hasattr(mag_plot, 'tolist') else list(mag_plot)
-
-            fig.add_trace(
-                go.Scatter(
-                    x=freq_list,  # ← Use Python list instead of numpy array
-                    y=mag_list,   # ← Use Python list instead of numpy array
-                    mode="lines",
-                    name=self.channel_names[channel] if channel < len(self.channel_names) else f"Ch{channel+1}",
-                    line={"color": colors[channel % len(colors)], "width": GUIDefaults.PLOT_LINE_WIDTH},
-                    showlegend=False
-                ),
-                row=channel + 1,
-                col=1
+            # Create trace for this channel
+            trace = go.Scatter(
+                x=freq_plot,
+                y=mag_plot,
+                mode="lines",
+                name=self.channel_names[channel] if channel < len(self.channel_names) else f"Ch{channel+1}",
+                line={"color": colors[channel % len(colors)], "width": GUIDefaults.PLOT_LINE_WIDTH}
             )
 
+            traces = [trace]
+
+            # Add peaks if enabled
             if self.show_peaks and self.peaks:
                 peak_info = next((p for p in self.peaks if p['channel'] == channel), None)
                 if peak_info is not None:
@@ -941,60 +1044,52 @@ class FFTPlotWidget(QWidget):
                         peak_freqs = peak_freqs[mask]
                         peak_mags = peak_mags[mask]
                     if len(peak_freqs) > 0:
-                        # Convert to lists for consistency
-                        peak_freqs_list = peak_freqs.tolist() if hasattr(peak_freqs, 'tolist') else list(peak_freqs)
-                        peak_mags_list = peak_mags.tolist() if hasattr(peak_mags, 'tolist') else list(peak_mags)
-
-                        fig.add_trace(
+                        traces.append(
                             go.Scatter(
-                                x=peak_freqs_list,
-                                y=peak_mags_list,
+                                x=peak_freqs,
+                                y=peak_mags,
                                 mode="markers",
                                 marker={"color": colors[channel % len(colors)], "size": 8},
                                 showlegend=False
-                            ),
-                            row=channel + 1,
-                            col=1
+                            )
                         )
 
-            # Update y-axis for this subplot
-            fig.update_yaxes(
-                title_text=f"{self._get_magnitude_unit()}",
-                showgrid=True,
-                gridcolor="#e0e0e0",
-                zeroline=False,
-                automargin=True,
-                row=channel + 1,
-                col=1
-            )
+            # Create layout for this individual plot
+            layout = {
+                "autosize": True,
+                "margin": {"l": 60, "r": 20, "t": 30, "b": 40 if channel == self.n_channels - 1 else 20},
+                "plot_bgcolor": self._plotly_background(),
+                "paper_bgcolor": self._plotly_background(),
+                "showlegend": False,
+                "title": {
+                    "text": f"<b>{self.channel_names[channel] if channel < len(self.channel_names) else f'Ch{channel+1}'}</b>",
+                    "font": {"size": 14, "color": "#111"},
+                    "x": 0.01,
+                    "xanchor": "left"
+                },
+                "xaxis": {
+                    "title": "Frequency (Hz)" if channel == self.n_channels - 1 else "",
+                    "showgrid": True,
+                    "gridcolor": "#e0e0e0",
+                    "zeroline": False,
+                    "automargin": True
+                },
+                "yaxis": {
+                    "title": f"{self._get_magnitude_unit()}",
+                    "showgrid": True,
+                    "gridcolor": "#e0e0e0",
+                    "zeroline": False,
+                    "automargin": True
+                },
+                "uirevision": f"channel_{channel}"  # Keep zoom/pan state per channel
+            }
 
-        # Update x-axis only for bottom subplot
-        fig.update_xaxes(
-            title_text="Frequency (Hz)",
-            showgrid=True,
-            gridcolor="#e0e0e0",
-            zeroline=False,
-            automargin=True,
-            row=self.n_channels,
-            col=1
-        )
+            # Apply frequency limit to x-axis if set
+            if self.frequency_limit != "Full":
+                layout["xaxis"]["range"] = [0, float(self.frequency_limit)]
 
-        if self.frequency_limit != "Full":
-            fig.update_xaxes(range=[0, float(self.frequency_limit)])
-
-        # Calculate appropriate height (min 150px per subplot)
-        plot_height = max(400, self.n_channels * 150)
-
-        fig.update_layout(
-            height=plot_height,
-            margin={"l": 60, "r": 20, "t": 40, "b": 45},
-            plot_bgcolor=self._plotly_background(),
-            paper_bgcolor=self._plotly_background(),
-            showlegend=False
-        )
-
-        fig_dict = fig.to_dict()
-        self.plot_view.update_plot(fig_dict["data"], fig_dict["layout"])
+            # Update this specific PlotlyView
+            self.plot_views_stack[channel].update_plot(traces, layout)
 
     def _find_peaks(self, frequencies: np.ndarray, magnitude: np.ndarray) -> List[Tuple[float, float, int]]:
         """
@@ -1093,21 +1188,74 @@ class FFTPlotWidget(QWidget):
         """Handle display mode change (overlay/stack)."""
         old_mode = self.display_mode
         self.display_mode = self.display_mode_combo.currentData()
-        self.logger.debug(f"Display mode changed to {self.display_mode}")
-        
-        # Rebuild plots if mode changed
+        self.logger.debug(f"FFT display mode changing from {old_mode} to {self.display_mode}")
+
+        # Switch between overlay and stack modes
         if old_mode != self.display_mode and self.n_channels > 0:
-            self._rebuild_plots()
+            try:
+                if self.display_mode == "stack":
+                    # Switching to stack mode: create individual plot views
+                    self.logger.info("FFT: Switching to stack mode: creating individual PlotlyView widgets")
+
+                    # Destroy single plot view if it exists
+                    if self.plot_view_single is not None:
+                        self.plot_view_single.deleteLater()
+                        self.plot_view_single = None
+
+                    # Create stack plot container
+                    self._create_stack_plot_container()
+
+                else:  # overlay mode
+                    # Switching to overlay mode: use single plot view
+                    self.logger.info("FFT: Switching to overlay mode: creating single PlotlyView widget")
+
+                    # Destroy stack plot container
+                    self._destroy_stack_plot_container()
+
+                    # Create single plot view
+                    self.plot_view_single = PlotlyView()
+                    self.plot_view_single.setMinimumHeight(300)
+                    self.scroll_area.setWidget(self.plot_view_single)
+
+                    # Initialize with empty plot
+                    QTimer.singleShot(500, self._init_empty_plot)
+
+                # Trigger redraw with current data if available
+                self._rebuild_plots()
+
+            except Exception as e:
+                self.logger.error(f"Error during FFT display mode change: {e}")
+
+        self.logger.debug(f"FFT display mode changed to {self.display_mode}")
 
     def _on_clear(self):
         """Clear the plot."""
-        if not PLOTLY_AVAILABLE or self.plot_view is None:
+        if not PLOTLY_AVAILABLE:
             return
-        self.plot_view.update_plot([], self._base_layout(
-            y_title=f"Magnitude ({self._get_magnitude_unit()})",
-            x_title="Frequency (Hz)",
-            show_legend=True
-        ))
+
+        if self.display_mode == "overlay" and self.plot_view_single is not None:
+            # Clear single overlay plot
+            self.plot_view_single.update_plot([], self._base_layout(
+                y_title=f"Magnitude ({self._get_magnitude_unit()})",
+                x_title="Frequency (Hz)",
+                show_legend=True
+            ))
+        elif self.display_mode == "stack" and self.plot_views_stack:
+            # Clear all stack plots
+            for i, plot_view in enumerate(self.plot_views_stack):
+                channel_name = self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}"
+                layout = self._base_layout(
+                    y_title=f"{self._get_magnitude_unit()}",
+                    x_title="Frequency (Hz)" if i == len(self.plot_views_stack) - 1 else "",
+                    show_legend=False
+                )
+                layout["title"] = {
+                    "text": f"<b>{channel_name}</b>",
+                    "font": {"size": 14, "color": "#111"},
+                    "x": 0.01,
+                    "xanchor": "left"
+                }
+                plot_view.update_plot([], layout)
 
         self.logger.debug("FFT plot cleared")
 
@@ -1126,6 +1274,8 @@ class FFTPlotWidget(QWidget):
                     self._update_overlay_plots()
                 else:
                     self._update_stack_plots()
+            if self.display_mode == "stack":
+                self._update_stack_plot_heights()
 
     def show_all_channels(self):
         """Show all channels."""
@@ -1138,21 +1288,25 @@ class FFTPlotWidget(QWidget):
             self.set_channel_visibility(i, False)
 
     def start(self):
-        """Start plot updates."""
-        if not self.update_timer.isActive():
-            self.update_timer.start()
-            self.logger.debug("FFT plot updates started")
+        """Start plot updates - No-op for FFT (file-based analysis only)."""
+        # FFT widget is file-based, no real-time updates
+        self.logger.debug("FFT plot start called (no-op for file-based analysis)")
 
     def stop(self):
-        """Stop plot updates."""
-        if self.update_timer.isActive():
-            self.update_timer.stop()
-            self.logger.debug("FFT plot updates stopped")
+        """Stop plot updates - No-op for FFT (file-based analysis only)."""
+        # FFT widget is file-based, no real-time updates
+        self.logger.debug("FFT plot stop called (no-op for file-based analysis)")
 
     def closeEvent(self, event):
         """Handle widget close event."""
-        self.stop()
+        # No cleanup needed for FFT widget (file-based only)
         event.accept()
+
+    def resizeEvent(self, event):
+        """Handle resize events to keep stack plots sized to the window."""
+        super().resizeEvent(event)
+        if self.display_mode == "stack":
+            self._update_stack_plot_heights()
     
     def contextMenuEvent(self, event):
         """Handle right-click context menu."""

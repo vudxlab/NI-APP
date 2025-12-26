@@ -35,6 +35,7 @@ class DAQConfigPanel(QWidget):
     # Signals
     start_requested = pyqtSignal()
     stop_requested = pyqtSignal()
+    save_data_requested = pyqtSignal()
     config_changed = pyqtSignal(DAQConfig)
 
     def __init__(self, parent=None):
@@ -175,15 +176,35 @@ class DAQConfigPanel(QWidget):
         return group
 
     def _create_autosave_group(self) -> QGroupBox:
-        """Create auto-save configuration group."""
-        group = QGroupBox("Auto-Save During Acquisition")
+        """Create manual save configuration group."""
+        group = QGroupBox("Data Save Settings")
         layout = QFormLayout()
 
-        # Enable auto-save checkbox
-        self.autosave_enabled = QCheckBox("Enable Auto-Save")
-        self.autosave_enabled.setChecked(True)
-        self.autosave_enabled.setToolTip("Automatically save data to file during acquisition")
-        layout.addRow("", self.autosave_enabled)
+        # Save Data Now button
+        self.save_data_button = QPushButton("Save Data Now")
+        self.save_data_button.setMinimumHeight(35)
+        self.save_data_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #0D47A1;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+                color: #666666;
+            }
+        """)
+        self.save_data_button.setToolTip("Save current stable data to file")
+        self.save_data_button.setEnabled(False)  # Disabled until acquisition starts
+        layout.addRow("", self.save_data_button)
 
         # Save location
         self.save_location_edit = QLineEdit()
@@ -367,6 +388,7 @@ class DAQConfigPanel(QWidget):
         self.buffer_duration_spin.valueChanged.connect(self._on_config_changed)
         self.acq_mode_combo.currentIndexChanged.connect(self._on_config_changed)
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
+        self.save_data_button.clicked.connect(self._on_save_data_clicked)
 
     def _refresh_devices(self):
         """Refresh the list of available devices."""
@@ -506,6 +528,10 @@ class DAQConfigPanel(QWidget):
         """Handle stop button click."""
         self.stop_requested.emit()
 
+    def _on_save_data_clicked(self):
+        """Handle save data button click."""
+        self.save_data_requested.emit()
+
     def _on_browse_save_location(self):
         """Open directory picker for save location."""
         current_path = self.save_location_edit.text()
@@ -599,25 +625,34 @@ class DAQConfigPanel(QWidget):
 
         return self.config
 
-    def get_autosave_config(self) -> dict:
+    def get_save_config(self) -> dict:
         """
-        Get auto-save configuration.
+        Get data save configuration.
 
         Returns:
-            Dictionary with auto-save settings:
-                - enabled: bool
+            Dictionary with save settings:
                 - save_location: str
                 - file_format: str ('hdf5', 'tdms', or 'csv')
                 - file_prefix: str
                 - compression_level: int
         """
         return {
-            'enabled': self.autosave_enabled.isChecked(),
             'save_location': self.save_location_edit.text(),
             'file_format': self.file_format_combo.currentData(),
             'file_prefix': self.file_prefix_edit.text(),
             'compression_level': self.compression_level_spin.value()
         }
+
+    def get_autosave_config(self) -> dict:
+        """
+        Get auto-save configuration (deprecated, use get_save_config).
+
+        Returns:
+            Dictionary with save settings
+        """
+        config = self.get_save_config()
+        config['enabled'] = False  # No longer auto-saving
+        return config
 
     def set_acquisition_state(self, running: bool):
         """
@@ -634,8 +669,7 @@ class DAQConfigPanel(QWidget):
         self.acq_mode_combo.setEnabled(not running)
         self.refresh_button.setEnabled(not running)
 
-        # Disable/enable auto-save controls
-        self.autosave_enabled.setEnabled(not running)
+        # Disable/enable save controls (keep them enabled during acquisition for flexibility)
         self.save_location_edit.setEnabled(not running)
         self.file_format_combo.setEnabled(not running)
         self.file_prefix_edit.setEnabled(not running)
@@ -644,6 +678,11 @@ class DAQConfigPanel(QWidget):
         # Update buttons
         self.start_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
+        self.save_data_button.setEnabled(running)  # Enable save button during acquisition
+
+        # Reset save button text when stopping acquisition
+        if not running:
+            self.save_data_button.setText("Save Data Now")
 
         # Update status
         if running:
@@ -652,6 +691,56 @@ class DAQConfigPanel(QWidget):
         else:
             self.status_label.setText("Ready")
             self._set_status_color("gray")
+
+    def set_saving_state(self, saving: bool):
+        """
+        Update save button based on saving state.
+
+        Args:
+            saving: True if currently saving data
+        """
+        if saving:
+            self.save_data_button.setText("Stop Saving")
+            self.save_data_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #FF9800;
+                    color: white;
+                    font-weight: bold;
+                    border: none;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #F57C00;
+                }
+                QPushButton:pressed {
+                    background-color: #E65100;
+                }
+                QPushButton:disabled {
+                    background-color: #cccccc;
+                    color: #666666;
+                }
+            """)
+        else:
+            self.save_data_button.setText("Save Data Now")
+            self.save_data_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    color: white;
+                    font-weight: bold;
+                    border: none;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #1976D2;
+                }
+                QPushButton:pressed {
+                    background-color: #0D47A1;
+                }
+                QPushButton:disabled {
+                    background-color: #cccccc;
+                    color: #666666;
+                }
+            """)
 
 
 # Example usage

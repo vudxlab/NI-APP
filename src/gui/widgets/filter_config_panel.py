@@ -53,9 +53,9 @@ class FilterConfigPanel(QWidget):
         # Current filter configuration
         self.filter_config = {
             'type': ProcessingDefaults.DEFAULT_FILTER_TYPE,
-            'mode': ProcessingDefaults.FILTER_MODE_LOWPASS,
-            'cutoff_low': ProcessingDefaults.DEFAULT_LOWPASS_CUTOFF,
-            'cutoff_high': 5000.0,
+            'mode': ProcessingDefaults.FILTER_MODE_HIGHPASS,
+            'cutoff_low': 0.1,
+            'cutoff_high': 100.0,
             'order': ProcessingDefaults.DEFAULT_FILTER_ORDER,
             'enabled': False
         }
@@ -81,43 +81,30 @@ class FilterConfigPanel(QWidget):
         layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(8)
 
-        # Enable/disable group
-        enable_group = self._create_enable_group()
-        layout.addWidget(enable_group, 0, 0, 1, 2)
-
         # Filter type selection
         type_group = self._create_type_group()
-        layout.addWidget(type_group, 1, 0)
+        layout.addWidget(type_group, 0, 0)
 
         # Filter mode selection
         mode_group = self._create_mode_group()
-        layout.addWidget(mode_group, 2, 0)
+        layout.addWidget(mode_group, 1, 0)
 
         # Cutoff frequency group
         cutoff_group = self._create_cutoff_group()
-        layout.addWidget(cutoff_group, 1, 1)
+        layout.addWidget(cutoff_group, 0, 1)
 
         # Filter order group
         order_group = self._create_order_group()
-        layout.addWidget(order_group, 2, 1)
+        layout.addWidget(order_group, 1, 1)
 
-        # Apply button
-        apply_layout = QHBoxLayout()
-        self.apply_button = QPushButton("Apply Filter")
-        self.apply_button.setEnabled(False)
-        self.apply_button.clicked.connect(self._on_apply)
-        apply_layout.addWidget(self.apply_button)
-
-        self.reset_button = QPushButton("Reset")
-        self.reset_button.clicked.connect(self._on_reset)
-        apply_layout.addWidget(self.reset_button)
-
-        layout.addLayout(apply_layout, 3, 0, 1, 2)
+        # Set equal column stretches for both columns
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
 
         # Add stretch to push everything to top
         layout.addItem(
             QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding),
-            4,
+            2,
             0,
             1,
             2
@@ -129,29 +116,11 @@ class FilterConfigPanel(QWidget):
         # Add scroll area to main layout
         main_layout.addWidget(scroll_area)
 
-    def _create_enable_group(self) -> QGroupBox:
-        """Create enable/disable group."""
-        group = QGroupBox("Filter Status")
-        layout = QHBoxLayout()
+        # Initialize UI state with defaults
+        self._update_cutoff_ui()
+        self._update_type_description()
+        self._update_mode_description()
 
-        self.enable_checkbox = QCheckBox("Enable Filtering")
-        self.enable_checkbox.setChecked(False)
-        self.enable_checkbox.stateChanged.connect(self._on_enable_changed)
-        layout.addWidget(self.enable_checkbox)
-
-        status_label = QLabel("Filtering: ")
-        layout.addWidget(status_label)
-
-        self.status_indicator = QLabel("DISABLED")
-        self.status_indicator.setStyleSheet(
-            "QLabel { color: #999999; font-weight: bold; }"
-        )
-        layout.addWidget(self.status_indicator)
-
-        layout.addStretch()
-
-        group.setLayout(layout)
-        return group
 
     def _create_type_group(self) -> QGroupBox:
         """Create filter type selection group."""
@@ -196,6 +165,9 @@ class FilterConfigPanel(QWidget):
         self.mode_combo.addItem("Bandpass", ProcessingDefaults.FILTER_MODE_BANDPASS)
         self.mode_combo.addItem("Bandstop (Notch)", ProcessingDefaults.FILTER_MODE_BANDSTOP)
 
+        # Set default to Highpass
+        self.mode_combo.setCurrentIndex(1)
+
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         layout.addWidget(self.mode_combo)
 
@@ -220,7 +192,7 @@ class FilterConfigPanel(QWidget):
         self.cutoff_low_spin = QDoubleSpinBox()
         self.cutoff_low_spin.setRange(0.001, 25000.0)
         self.cutoff_low_spin.setDecimals(3)
-        self.cutoff_low_spin.setValue(ProcessingDefaults.DEFAULT_LOWPASS_CUTOFF)
+        self.cutoff_low_spin.setValue(0.1)
         self.cutoff_low_spin.setSuffix(" Hz")
         self.cutoff_low_spin.setSingleStep(0.001)
         self.cutoff_low_spin.valueChanged.connect(self._on_parameter_changed)
@@ -232,7 +204,7 @@ class FilterConfigPanel(QWidget):
         self.cutoff_high_spin = QDoubleSpinBox()
         self.cutoff_high_spin.setRange(0.001, 25000.0)
         self.cutoff_high_spin.setDecimals(3)
-        self.cutoff_high_spin.setValue(5000.0)
+        self.cutoff_high_spin.setValue(100.0)
         self.cutoff_high_spin.setSuffix(" Hz")
         self.cutoff_high_spin.setSingleStep(0.001)
         self.cutoff_high_spin.valueChanged.connect(self._on_parameter_changed)
@@ -264,19 +236,6 @@ class FilterConfigPanel(QWidget):
         self.order_spin.setValue(ProcessingDefaults.DEFAULT_FILTER_ORDER)
         self.order_spin.valueChanged.connect(self._on_parameter_changed)
         order_layout.addWidget(self.order_spin)
-
-        # Preset buttons
-        order_layout.addSpacing(20)
-        order_layout.addWidget(QLabel("Presets:"))
-
-        preset_layout = QHBoxLayout()
-        for order in [2, 4, 6, 8]:
-            btn = QPushButton(str(order))
-            btn.setMaximumWidth(40)
-            btn.clicked.connect(lambda checked, o=order: self.order_spin.setValue(o))
-            preset_layout.addWidget(btn)
-
-        order_layout.addLayout(preset_layout)
         order_layout.addStretch()
 
         layout.addLayout(order_layout)
@@ -347,66 +306,16 @@ class FilterConfigPanel(QWidget):
 
             self.cutoff_high_spin.setEnabled(False)
 
-    def _on_enable_changed(self, state: int):
-        """Handle enable checkbox change."""
-        enabled = (state == Qt.Checked)
-        self.filter_config['enabled'] = enabled
-
-        # Update status indicator
-        if enabled:
-            self.status_indicator.setText("ENABLED")
-            self.status_indicator.setStyleSheet(
-                "QLabel { color: #4CAF50; font-weight: bold; }"
-            )
-            self.apply_button.setEnabled(True)
-        else:
-            self.status_indicator.setText("DISABLED")
-            self.status_indicator.setStyleSheet(
-                "QLabel { color: #999999; font-weight: bold; }"
-            )
-            self.apply_button.setEnabled(False)
-
-        self.filter_enabled.emit(enabled)
-        self.logger.info(f"Filter {'enabled' if enabled else 'disabled'}")
-
     def _on_parameter_changed(self):
         """Handle parameter change."""
         # Update descriptions
         self._update_type_description()
-
-        # Mark apply button as available if filter is enabled
-        if self.enable_checkbox.isChecked():
-            self.apply_button.setEnabled(True)
 
     def _on_mode_changed(self):
         """Handle filter mode change."""
         self._update_cutoff_ui()
         self._update_mode_description()
         self._on_parameter_changed()
-
-    def _on_apply(self):
-        """Apply filter configuration."""
-        self.filter_config = self.get_current_ui_config()
-
-        self.logger.info(f"Filter applied: {self.filter_config}")
-        self.filter_changed.emit(self.filter_config)
-
-        # Disable apply button until next change
-        self.apply_button.setEnabled(False)
-
-    def _on_reset(self):
-        """Reset filter to defaults."""
-        # Reset UI to defaults
-        self.type_combo.setCurrentIndex(0)  # Butterworth
-        self.mode_combo.setCurrentIndex(0)  # Lowpass
-        self.cutoff_low_spin.setValue(ProcessingDefaults.DEFAULT_LOWPASS_CUTOFF)
-        self.cutoff_high_spin.setValue(5000.0)
-        self.order_spin.setValue(ProcessingDefaults.DEFAULT_FILTER_ORDER)
-
-        # Disable filtering
-        self.enable_checkbox.setChecked(False)
-
-        self.logger.info("Filter reset to defaults")
 
     def get_filter_config(self) -> dict:
         """
@@ -430,7 +339,7 @@ class FilterConfigPanel(QWidget):
             'cutoff_low': self.cutoff_low_spin.value(),
             'cutoff_high': self.cutoff_high_spin.value(),
             'order': self.order_spin.value(),
-            'enabled': self.enable_checkbox.isChecked()
+            'enabled': True  # Always enabled when OK is clicked
         }
 
         if config['mode'] in [ProcessingDefaults.FILTER_MODE_BANDPASS,
@@ -457,7 +366,6 @@ class FilterConfigPanel(QWidget):
         self.cutoff_low_spin.blockSignals(True)
         self.cutoff_high_spin.blockSignals(True)
         self.order_spin.blockSignals(True)
-        self.enable_checkbox.blockSignals(True)
 
         try:
             # Set values
@@ -469,11 +377,9 @@ class FilterConfigPanel(QWidget):
             if mode_idx >= 0:
                 self.mode_combo.setCurrentIndex(mode_idx)
 
-            self.cutoff_low_spin.setValue(config.get('cutoff_low',
-                                                        ProcessingDefaults.DEFAULT_LOWPASS_CUTOFF))
-            self.cutoff_high_spin.setValue(config.get('cutoff_high', 5000.0))
+            self.cutoff_low_spin.setValue(config.get('cutoff_low', 0.1))
+            self.cutoff_high_spin.setValue(config.get('cutoff_high', 100.0))
             self.order_spin.setValue(config.get('order', ProcessingDefaults.DEFAULT_FILTER_ORDER))
-            self.enable_checkbox.setChecked(config.get('enabled', current_enabled))
 
         finally:
             # Unblock signals
@@ -482,7 +388,6 @@ class FilterConfigPanel(QWidget):
             self.cutoff_low_spin.blockSignals(False)
             self.cutoff_high_spin.blockSignals(False)
             self.order_spin.blockSignals(False)
-            self.enable_checkbox.blockSignals(False)
 
         # Update UI state
         self._update_cutoff_ui()

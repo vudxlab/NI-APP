@@ -21,13 +21,14 @@ from ...utils.logger import get_logger
 class DataAnalysisPanel(QWidget):
     """Left-side panel for saved-data analysis."""
 
-    def __init__(self, realtime_plot_widget, fft_plot_widget, parent=None):
+    def __init__(self, realtime_plot_widget, fft_plot_widget, plot_tabs=None, parent=None):
         super().__init__(parent)
 
         self.logger = get_logger(__name__)
 
         self.realtime_plot_widget = realtime_plot_widget
         self.fft_plot_widget = fft_plot_widget
+        self.plot_tabs = plot_tabs
 
         self.current_data_file: Path = None
         self.data_file_info = None
@@ -179,6 +180,8 @@ class DataAnalysisPanel(QWidget):
                     self.realtime_plot_widget.update_interval_ms + 10,
                     self.realtime_plot_widget.stop
                 )
+                if self.plot_tabs is not None:
+                    self.plot_tabs.setCurrentIndex(0)
 
             self.logger.info(
                 f"Loaded {samples_read} samples ({actual_duration:.2f}s) for time-domain display"

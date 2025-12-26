@@ -59,7 +59,6 @@ class MainWindow(QMainWindow):
         self.fft_plot_widget = None
         self.data_analysis_panel = None
         self.filter_config_panel = None
-        self.export_panel = None
 
         # Status update timer
         self.status_timer = QTimer()
@@ -122,14 +121,6 @@ class MainWindow(QMainWindow):
         save_action.setShortcut(QKeySequence.Save)
         save_action.triggered.connect(self._on_save_configuration)
         file_menu.addAction(save_action)
-
-        file_menu.addSeparator()
-
-        # Export data
-        export_action = QAction("&Export Data...", self)
-        export_action.setShortcut("Ctrl+E")
-        export_action.triggered.connect(self._on_export_data)
-        file_menu.addAction(export_action)
 
         file_menu.addSeparator()
 
@@ -214,17 +205,13 @@ class MainWindow(QMainWindow):
         self.daq_config_panel = DAQConfigPanel()
         self.daq_config_panel.start_requested.connect(self._on_start_acquisition)
         self.daq_config_panel.stop_requested.connect(self._on_stop_acquisition)
+        self.daq_config_panel.save_data_requested.connect(self._on_save_data_requested)
         self.config_tabs.addTab(self.daq_config_panel, "DAQ")
         
         # Channel Configuration tab
         from .widgets.channel_config_widget import ChannelConfigWidget
         self.channel_config_widget = ChannelConfigWidget()
         self.config_tabs.addTab(self.channel_config_widget, "Channels")
-        
-        # Export tab
-        from .widgets.export_panel import ExportPanel
-        self.export_panel = ExportPanel()
-        self.config_tabs.addTab(self.export_panel, "Export")
 
         # Create plot tabs (right side)
         self.plot_tabs = QTabWidget()
@@ -264,7 +251,8 @@ class MainWindow(QMainWindow):
         from .widgets.data_analysis_panel import DataAnalysisPanel
         self.data_analysis_panel = DataAnalysisPanel(
             self.realtime_plot_widget,
-            self.fft_plot_widget
+            self.fft_plot_widget,
+            self.plot_tabs
         )
         self.config_tabs.addTab(self.data_analysis_panel, "Data Analysis")
         
@@ -599,6 +587,9 @@ class MainWindow(QMainWindow):
         """
         self.logger.info(f"Save file created: {filepath}")
 
+        # Update saving state
+        self.daq_config_panel.set_saving_state(True)
+
         # Update FFT widget with file path
         if self.fft_plot_widget:
             self.fft_plot_widget.set_data_file(filepath)
@@ -607,7 +598,7 @@ class MainWindow(QMainWindow):
 
         # Update status bar
         filename = Path(filepath).name
-        self.statusBar().showMessage(f"Saving to: {filename}", 5000)
+        self.statusBar().showMessage(f"Continuously saving to: {filename}...", 5000)
 
     @pyqtSlot(str)
     def _on_save_file_closed(self, filepath: str):
@@ -619,11 +610,24 @@ class MainWindow(QMainWindow):
         """
         self.logger.info(f"Save file closed: {filepath}")
 
+        # Update saving state
+        self.daq_config_panel.set_saving_state(False)
+
         # Show file size in status bar
         try:
             size_mb = Path(filepath).stat().st_size / (1024 * 1024)
             filename = Path(filepath).name
             self.statusBar().showMessage(f"Saved: {filename} ({size_mb:.1f} MB)", 10000)
+
+            # Show message to user
+            QMessageBox.information(
+                self,
+                "Data Saved",
+                f"Data saved successfully!\n\n"
+                f"File: {filename}\n"
+                f"Size: {size_mb:.2f} MB\n\n"
+                f"The file is available in the 'Data Analysis' tab for offline analysis."
+            )
         except Exception as e:
             self.logger.error(f"Failed to get file size: {e}")
             self.statusBar().showMessage(f"File saved: {Path(filepath).name}", 10000)
@@ -638,6 +642,38 @@ class MainWindow(QMainWindow):
         """
         self.logger.error(f"Save error: {error_msg}")
         QMessageBox.warning(self, "Save Error", f"Data save error:\n{error_msg}")
+
+    def _on_save_data_requested(self):
+        """Handle manual save data request from DAQ panel - toggle continuous saving."""
+        if self.acquisition_thread is None or not self.acquisition_thread.isRunning():
+            QMessageBox.warning(
+                self,
+                "Save Data",
+                "No acquisition running. Start acquisition first."
+            )
+            return
+
+        try:
+            # Check if currently saving
+            if self.acquisition_thread.is_saving():
+                # Stop saving
+                self.acquisition_thread.stop_saving()
+                self.daq_config_panel.set_saving_state(False)
+                self.logger.info("Stopped continuous data saving")
+            else:
+                # Start saving
+                save_config = self.daq_config_panel.get_save_config()
+                self.acquisition_thread.start_saving(save_config)
+                self.daq_config_panel.set_saving_state(True)
+                self.logger.info("Started continuous data saving")
+
+        except Exception as e:
+            self.logger.error(f"Failed to toggle saving: {e}")
+            QMessageBox.critical(
+                self,
+                "Save Error",
+                f"Failed to toggle data saving:\n{str(e)}"
+            )
 
     def _update_status_bar(self):
         """Update status bar periodically."""
@@ -809,59 +845,6 @@ class MainWindow(QMainWindow):
                     f"Failed to save configuration:\n{e}"
                 )
 
-    def _on_export_data(self):
-        """Export acquired data using the export panel."""
-        if self.signal_processor is None:
-            QMessageBox.warning(
-                self,
-                "Export Data",
-                "No data available. Start acquisition first."
-            )
-            return
-
-        # Get data from signal processor
-        try:
-            # Get all available filtered data
-            data = self.signal_processor.get_filtered_data()
-
-            if data is None or data.shape[1] == 0:
-                QMessageBox.warning(
-                    self,
-                    "Export Data",
-                    "No data available in buffer."
-                )
-                return
-
-            # Get channel info
-            channel_names = self.signal_processor.get_channel_names()
-            channel_units = self.signal_processor.get_channel_units()
-
-            # Set data in export panel
-            self.export_panel.set_data(
-                data=data,
-                sample_rate=self.config.sample_rate,
-                channel_names=channel_names,
-                channel_units=channel_units
-            )
-
-            # Show export panel
-            self.export_dock = self.findChild(QDockWidget, "Export")
-            if self.export_dock:
-                self.export_dock.show()
-                self.export_dock.raise_()
-
-            self.statusBar().showMessage(
-                f"Ready to export: {data.shape[1]:,} samples from {len(channel_names)} channels",
-                5000
-            )
-
-        except Exception as e:
-            self.logger.error(f"Failed to prepare export: {e}")
-            QMessageBox.critical(
-                self,
-                "Export Error",
-                f"Failed to prepare data for export:\n{e}"
-            )
 
     def _on_clear_buffers(self):
         """Clear all data buffers."""

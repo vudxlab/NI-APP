@@ -71,7 +71,7 @@ class ChannelDefaults:
     IEPE_ENABLED = True
 
     # Accelerometer sensitivity (mV/g)
-    ACCELEROMETER_SENSITIVITY = 100.0  # Common value for many accelerometers
+    ACCELEROMETER_SENSITIVITY = 10000.0  # Default to 10000 mV/g
 
     # Engineering units
     UNITS_G = "g"
