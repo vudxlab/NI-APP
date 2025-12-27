@@ -28,6 +28,12 @@ try:
 except ImportError:
     NPTDMS_AVAILABLE = False
 
+try:
+    import scipy.io
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+
 from ..utils.logger import get_logger
 
 
@@ -52,7 +58,7 @@ class DataFileReader:
             filepath: Path to data file
 
         Returns:
-            Format string ('hdf5', 'csv', or 'tdms')
+            Format string ('hdf5', 'csv', 'tdms', or 'mat')
 
         Raises:
             ValueError: If format cannot be determined
@@ -66,6 +72,8 @@ class DataFileReader:
             return 'csv'
         elif suffix == '.tdms':
             return 'tdms'
+        elif suffix == '.mat':
+            return 'mat'
         else:
             raise ValueError(f"Unknown file format: {suffix}")
 
@@ -110,6 +118,8 @@ class DataFileReader:
             return self._read_csv_recent(filepath, duration_seconds, sample_rate)
         elif file_format == 'tdms':
             return self._read_tdms_recent(filepath, duration_seconds, sample_rate)
+        elif file_format == 'mat':
+            return self._read_mat_recent(filepath, duration_seconds, sample_rate)
         else:
             raise ValueError(f"Unsupported format: {file_format}")
 
@@ -368,6 +378,121 @@ class DataFileReader:
             self.logger.error(f"Failed to read TDMS file: {e}")
             raise
 
+    def _read_mat_recent(
+        self,
+        filepath: Path,
+        duration_seconds: float,
+        sample_rate: float
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Read recent data from MATLAB .mat file.
+
+        Args:
+            filepath: Path to .mat file
+            duration_seconds: Duration to read
+            sample_rate: Sampling rate
+
+        Returns:
+            (data, metadata) tuple
+        """
+        if not SCIPY_AVAILABLE:
+            raise ImportError("scipy not available. Install with: pip install scipy")
+
+        try:
+            # Load .mat file
+            mat_contents = scipy.io.loadmat(str(filepath))
+
+            # Filter out metadata keys
+            metadata_keys = {'__header__', '__version__', '__globals__'}
+            data_keys = [k for k in mat_contents.keys() if k not in metadata_keys]
+
+            if not data_keys:
+                raise ValueError("No data arrays found in .mat file")
+
+            # Use first data array (or look for specific names)
+            # Priority: look for common names first
+            priority_names = ['data', 'acquisition', 'Setup9', 'Setup']
+            main_key = None
+
+            for name in priority_names:
+                if name in data_keys:
+                    main_key = name
+                    break
+
+            if main_key is None:
+                # Use first available data key
+                main_key = data_keys[0]
+
+            # Get the data array
+            data_matlab = mat_contents[main_key]  # Shape: (n_samples, n_channels)
+
+            if data_matlab.ndim != 2:
+                raise ValueError(
+                    f"Expected 2D array, got {data_matlab.ndim}D array"
+                )
+
+            n_samples_total, n_channels = data_matlab.shape
+
+            # Calculate samples to read
+            n_samples_requested = int(duration_seconds * sample_rate)
+
+            # Get last N samples
+            if n_samples_total > n_samples_requested:
+                data_recent = data_matlab[-n_samples_requested:, :]
+            else:
+                data_recent = data_matlab
+
+            # Transpose to internal format: (n_channels, n_samples)
+            data = data_recent.T
+
+            # Extract metadata
+            metadata = {
+                'array_name': main_key,
+                'samples_read': data.shape[1],
+                'duration_read': data.shape[1] / sample_rate,
+                'n_channels': data.shape[0],
+                'total_samples_in_file': n_samples_total
+            }
+
+            # Try to extract additional metadata
+            if 'sample_rate' in mat_contents:
+                metadata['file_sample_rate'] = float(mat_contents['sample_rate'].flat[0])
+
+            if 'channel_names' in mat_contents:
+                # Handle cell array of strings from MATLAB
+                try:
+                    ch_names = mat_contents['channel_names']
+                    if isinstance(ch_names, np.ndarray):
+                        # Flatten and convert to list of strings
+                        metadata['channel_names'] = [str(n).strip() for n in ch_names.flatten()]
+                except:
+                    metadata['has_channel_names'] = True
+
+            if 'channel_units' in mat_contents:
+                try:
+                    ch_units = mat_contents['channel_units']
+                    if isinstance(ch_units, np.ndarray):
+                        metadata['channel_units'] = [str(u).strip() for u in ch_units.flatten()]
+                except:
+                    metadata['has_channel_units'] = True
+
+            if 'start_time' in mat_contents:
+                try:
+                    metadata['start_time'] = str(mat_contents['start_time'].flat[0])
+                except:
+                    pass
+
+            self.logger.info(
+                f"Read {data.shape[1]} samples from MAT file "
+                f"({metadata['duration_read']:.2f}s, array: {main_key})"
+            )
+
+            return data, metadata
+
+        except Exception as e:
+            self.logger.error(f"Failed to read MAT file: {e}")
+            raise
+
     def get_file_info(self, filepath: str) -> Dict[str, Any]:
         """
         Get information about a data file without reading all data.
@@ -402,6 +527,8 @@ class DataFileReader:
             info.update(self._get_csv_info(filepath))
         elif file_format == 'tdms':
             info.update(self._get_tdms_info(filepath))
+        elif file_format == 'mat':
+            info.update(self._get_mat_info(filepath))
 
         return info
 
@@ -501,6 +628,61 @@ class DataFileReader:
 
         except Exception as e:
             self.logger.warning(f"Could not read TDMS info: {e}")
+            return {}
+
+    def _get_mat_info(self, filepath: Path) -> Dict[str, Any]:
+        """Get MAT file information."""
+        if not SCIPY_AVAILABLE:
+            return {}
+
+        try:
+            # Load .mat file
+            mat_contents = scipy.io.loadmat(str(filepath))
+
+            info = {}
+
+            # Find main data array (ignore metadata keys)
+            metadata_keys = {'__header__', '__version__', '__globals__'}
+            data_keys = [k for k in mat_contents.keys() if k not in metadata_keys]
+
+            if data_keys:
+                # Use first data array or priority name
+                priority_names = ['data', 'acquisition', 'Setup9', 'Setup']
+                main_key = None
+                for name in priority_names:
+                    if name in data_keys:
+                        main_key = name
+                        break
+                if main_key is None:
+                    main_key = data_keys[0]
+
+                data_array = mat_contents[main_key]
+
+                if data_array.ndim == 2:
+                    n_samples, n_channels = data_array.shape
+                    info['total_samples'] = n_samples
+                    info['n_channels'] = n_channels
+                    info['array_name'] = main_key
+
+            # Extract metadata
+            if 'sample_rate' in mat_contents:
+                try:
+                    info['sample_rate'] = float(mat_contents['sample_rate'].flat[0])
+                    if 'total_samples' in info:
+                        info['duration_seconds'] = info['total_samples'] / info['sample_rate']
+                except:
+                    pass
+
+            if 'channel_names' in mat_contents:
+                info['has_channel_names'] = True
+
+            if 'channel_units' in mat_contents:
+                info['has_channel_units'] = True
+
+            return info
+
+        except Exception as e:
+            self.logger.warning(f"Could not read MAT info: {e}")
             return {}
 
     @staticmethod

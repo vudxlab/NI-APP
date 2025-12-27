@@ -235,6 +235,7 @@ class DAQConfigPanel(QWidget):
         self.file_format_combo.addItem("HDF5 (Recommended)", "hdf5")
         self.file_format_combo.addItem("TDMS", "tdms")
         self.file_format_combo.addItem("CSV", "csv")
+        self.file_format_combo.addItem("MAT (MATLAB)", "mat")
         self.file_format_combo.setToolTip("File format for saved data")
         default_format_idx = self.file_format_combo.findData("csv")
         if default_format_idx >= 0:

@@ -25,6 +25,12 @@ try:
 except ImportError:
     NPTDMS_AVAILABLE = False
 
+try:
+    import scipy.io
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+
 from ..utils.logger import get_logger
 
 
@@ -557,6 +563,183 @@ class StreamingTDMSWriter(StreamingWriter):
                 raise
 
 
+class StreamingMATWriter(StreamingWriter):
+    """
+    Streaming MATLAB .mat writer with buffered approach.
+
+    Unlike HDF5, MATLAB .mat files don't support true streaming/append mode.
+    Strategy: Buffer data in memory and rewrite entire file on flush.
+    This is acceptable for typical acquisition durations (< 10 minutes).
+
+    For very long acquisitions, consider using HDF5 and converting to MAT later.
+    """
+
+    def __init__(
+        self,
+        filepath: str,
+        n_channels: int,
+        sample_rate: float,
+        channel_names: List[str],
+        channel_units: List[str],
+        array_name: Optional[str] = None
+    ):
+        """
+        Initialize MATLAB .mat streaming writer.
+
+        Args:
+            filepath: Output .mat file path
+            n_channels: Number of channels
+            sample_rate: Sampling rate in Hz
+            channel_names: List of channel names
+            channel_units: List of units for each channel
+            array_name: Name for the data array in .mat file (defaults to file prefix)
+        """
+        super().__init__(filepath, n_channels, sample_rate, channel_names, channel_units)
+
+        if not SCIPY_AVAILABLE:
+            raise ImportError("scipy not available. Install with: pip install scipy")
+
+        # Extract array name from filepath if not provided
+        if array_name is None:
+            # Use filename without extension as array name
+            self.array_name = self.filepath.stem
+        else:
+            self.array_name = array_name
+
+        # In-memory buffer for accumulated data
+        self.data_buffer: List[np.ndarray] = []
+        self.buffer_samples = 0
+
+        # Memory limit: ~500MB of float64 data
+        # At 6 channels, ~10.4M samples = ~69 seconds @ 51.2 kHz
+        self.max_buffer_samples = 10_000_000
+
+    def open(self) -> None:
+        """Initialize the writer (create empty buffer)."""
+        with self._lock:
+            if self._is_open:
+                self.logger.warning("File already open")
+                return
+
+            try:
+                # Create parent directory if needed
+                self.filepath.parent.mkdir(parents=True, exist_ok=True)
+
+                # Initialize empty buffer
+                self.data_buffer = []
+                self.buffer_samples = 0
+                self._total_samples = 0
+
+                self._is_open = True
+                self.logger.info(f"MAT writer initialized: {self.filepath}")
+
+            except Exception as e:
+                self.logger.error(f"Failed to initialize MAT writer: {e}")
+                raise
+
+    def append(self, data: np.ndarray, timestamp: float) -> None:
+        """
+        Append data to in-memory buffer.
+
+        Args:
+            data: Data array of shape (n_channels, n_samples)
+            timestamp: Timestamp of first sample (stored but not used in MAT format)
+        """
+        if not self._is_open:
+            raise RuntimeError("File not open. Call open() first.")
+
+        with self._lock:
+            try:
+                n_new_samples = data.shape[1]
+
+                # Check buffer size limit
+                if self.buffer_samples + n_new_samples > self.max_buffer_samples:
+                    self.logger.warning(
+                        f"Buffer size limit reached ({self.max_buffer_samples} samples). "
+                        "Flushing to disk..."
+                    )
+                    self._flush_internal()
+
+                # Add to buffer (keep internal format for now)
+                self.data_buffer.append(data.copy())
+                self.buffer_samples += n_new_samples
+                self._total_samples += n_new_samples
+
+            except Exception as e:
+                self.logger.error(f"Failed to append MAT data: {e}")
+                raise
+
+    def flush(self) -> None:
+        """Write buffered data to .mat file."""
+        if not self._is_open:
+            return
+
+        with self._lock:
+            self._flush_internal()
+
+    def _flush_internal(self) -> None:
+        """Internal flush implementation (assumes lock is held)."""
+        if not self.data_buffer:
+            return  # Nothing to write
+
+        try:
+            # Concatenate all buffered data
+            # Shape: (n_channels, total_samples)
+            data_internal = np.concatenate(self.data_buffer, axis=1)
+
+            # Transpose to MATLAB convention: (n_samples, n_channels)
+            data_matlab = data_internal.T
+
+            # Prepare .mat file dictionary
+            mat_dict = {
+                self.array_name: data_matlab,
+                'channel_names': self.channel_names,
+                'channel_units': self.channel_units,
+                'sample_rate': self.sample_rate,
+                'start_time': self._start_time.isoformat()
+            }
+
+            # Write to file
+            scipy.io.savemat(
+                str(self.filepath),
+                mat_dict,
+                do_compression=True,
+                oned_as='column'
+            )
+
+            self.logger.info(
+                f"MAT file flushed: {self.filepath} "
+                f"({data_matlab.shape[0]} samples, {data_matlab.shape[1]} channels)"
+            )
+
+            # Clear buffer after successful write
+            self.data_buffer = []
+            self.buffer_samples = 0
+
+        except Exception as e:
+            self.logger.error(f"Failed to flush MAT file: {e}")
+            raise
+
+    def close(self) -> None:
+        """Close MAT writer and write final data."""
+        with self._lock:
+            if not self._is_open:
+                return
+
+            try:
+                # Final flush
+                self._flush_internal()
+
+                self._is_open = False
+                self.logger.info(
+                    f"MAT file closed: {self.filepath} ({self._total_samples} samples)"
+                )
+
+            except Exception as e:
+                self.logger.error(f"Error closing MAT file: {e}")
+                raise
+
+
 def create_streaming_writer(
     file_format: str,
     filepath: str,
@@ -570,13 +753,13 @@ def create_streaming_writer(
     Factory function to create appropriate streaming writer.
 
     Args:
-        file_format: Format type ('hdf5', 'csv', or 'tdms')
+        file_format: Format type ('hdf5', 'csv', 'tdms', or 'mat')
         filepath: Output file path
         n_channels: Number of channels
         sample_rate: Sampling rate in Hz
         channel_names: List of channel names
         channel_units: List of units for each channel
-        **kwargs: Additional format-specific arguments (e.g., compression_level for HDF5)
+        **kwargs: Additional format-specific arguments (e.g., compression_level for HDF5, array_name for MAT)
 
     Returns:
         StreamingWriter instance
@@ -600,5 +783,11 @@ def create_streaming_writer(
         return StreamingTDMSWriter(
             filepath, n_channels, sample_rate, channel_names, channel_units
         )
+    elif format_lower == 'mat':
+        array_name = kwargs.get('array_name', None)
+        return StreamingMATWriter(
+            filepath, n_channels, sample_rate, channel_names, channel_units,
+            array_name=array_name
+        )
     else:
-        raise ValueError(f"Unsupported file format: {file_format}. Supported: hdf5, csv, tdms")
+        raise ValueError(f"Unsupported file format: {file_format}. Supported: hdf5, csv, tdms, mat")

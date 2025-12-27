@@ -13,6 +13,7 @@ from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from .csv_exporter import CSVExporter
 from .hdf5_exporter import HDF5Exporter
 from .tdms_exporter import TDMSExporter
+from .mat_exporter import MATExporter
 from ..utils.logger import get_logger
 from ..utils.constants import ExportDefaults
 from ..daq.daq_config import DAQConfig
@@ -103,6 +104,7 @@ class ExportManager(QObject):
         self.csv_exporter = CSVExporter()
         self.hdf5_exporter = HDF5Exporter()
         self.tdms_exporter = TDMSExporter()
+        self.mat_exporter = MATExporter()
 
         self.logger.info("ExportManager initialized")
 
@@ -146,6 +148,8 @@ class ExportManager(QObject):
             exporter = self.hdf5_exporter
         elif format == ExportDefaults.FORMAT_TDMS:
             exporter = self.tdms_exporter
+        elif format == ExportDefaults.FORMAT_MAT:
+            exporter = self.mat_exporter
         else:
             raise ValueError(f"Unsupported format: {format}")
 

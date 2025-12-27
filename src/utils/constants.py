@@ -216,8 +216,9 @@ class ExportDefaults:
     FORMAT_CSV = "csv"
     FORMAT_HDF5 = "hdf5"
     FORMAT_TDMS = "tdms"
+    FORMAT_MAT = "mat"
 
-    SUPPORTED_FORMATS = [FORMAT_CSV, FORMAT_HDF5, FORMAT_TDMS]
+    SUPPORTED_FORMATS = [FORMAT_CSV, FORMAT_HDF5, FORMAT_TDMS, FORMAT_MAT]
     DEFAULT_FORMAT = FORMAT_TDMS
 
     # CSV settings
@@ -232,7 +233,8 @@ class ExportDefaults:
     FILE_EXTENSIONS = {
         FORMAT_CSV: ".csv",
         FORMAT_HDF5: ".hdf5",
-        FORMAT_TDMS: ".tdms"
+        FORMAT_TDMS: ".tdms",
+        FORMAT_MAT: ".mat"
     }
 
 

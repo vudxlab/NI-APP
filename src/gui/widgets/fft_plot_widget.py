@@ -384,6 +384,18 @@ class FFTPlotWidget(QWidget):
             QMessageBox.warning(self, "No Data", "No data file available for analysis.")
             return
 
+        # Validate sample rate
+        if not self.sample_rate or self.sample_rate <= 0:
+            QMessageBox.warning(
+                self,
+                "Sample Rate Required",
+                "Sample rate is required for FFT analysis.\n\n"
+                "Please enter the sample rate in the Data Analysis panel.\n"
+                "If the file was created by this application, the sample rate\n"
+                "should be automatically detected from the file metadata."
+            )
+            return
+
         # Get selected duration (this is the MAXIMUM duration)
         duration_str = self.fft_duration_combo.currentText()
         max_duration = float(duration_str.replace('s', ''))
@@ -1494,6 +1506,17 @@ class FFTPlotWidget(QWidget):
                 self,
                 "No Data",
                 "No saved data available. Please save buffer first."
+            )
+            return
+
+        # Validate sample rate
+        if not self.sample_rate or self.sample_rate <= 0:
+            QMessageBox.warning(
+                self,
+                "Sample Rate Required",
+                "Sample rate is required for long-window FFT analysis.\n\n"
+                "Sample rate should be set automatically from acquisition.\n"
+                "If not, please check the Data Analysis panel."
             )
             return
 

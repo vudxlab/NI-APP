@@ -306,7 +306,7 @@ class AcquisitionThread(QThread):
         file_format = self.autosave_config.get('file_format', 'hdf5')
 
         # Determine file extension
-        ext_map = {'hdf5': '.h5', 'tdms': '.tdms', 'csv': '.csv'}
+        ext_map = {'hdf5': '.h5', 'tdms': '.tdms', 'csv': '.csv', 'mat': '.mat'}
         file_ext = ext_map.get(file_format, '.h5')
 
         filename = f"{file_prefix}_{timestamp_str}{file_ext}"

@@ -16,7 +16,8 @@
       "Bash(ping:*)",
       "Bash(python:*)",
       "Bash(del test_downsample.py)",
-      "Bash(venv\\\\Scripts\\\\python.exe -m PyInstaller:*)"
+      "Bash(venv\\\\Scripts\\\\python.exe -m PyInstaller:*)",
+      "Bash(xargs:*)"
     ]
   }
 }
