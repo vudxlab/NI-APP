@@ -34,6 +34,7 @@ class GUISettings:
     realtime_time_window: float = 5.0  # seconds
     realtime_update_rate: int = 30  # Hz
     realtime_autoscale: bool = True
+    realtime_downsample_threshold: int = 1000  # Maximum points to display before downsampling
 
     # FFT plot settings
     fft_scale: str = "dB"  # "linear" or "dB"

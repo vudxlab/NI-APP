@@ -37,6 +37,7 @@ class DAQConfigPanel(QWidget):
     stop_requested = pyqtSignal()
     save_data_requested = pyqtSignal()
     config_changed = pyqtSignal(DAQConfig)
+    downsample_threshold_changed = pyqtSignal(int)
 
     def __init__(self, parent=None):
         """
@@ -156,6 +157,15 @@ class DAQConfigPanel(QWidget):
         self.samples_spin.setSingleStep(100)
         self.samples_spin.setToolTip("Number of samples to read per iteration")
         layout.addRow("Samples/Read:", self.samples_spin)
+
+        # Downsample threshold
+        self.downsample_spin = QSpinBox()
+        self.downsample_spin.setRange(100, 10000)
+        self.downsample_spin.setValue(1000)  # Will be updated from config
+        self.downsample_spin.setSingleStep(100)
+        self.downsample_spin.setToolTip("Maximum points to display before downsampling (plot optimization)")
+        self.downsample_spin.valueChanged.connect(self.downsample_threshold_changed.emit)
+        layout.addRow("Downsample:", self.downsample_spin)
 
         # Buffer duration
         self.buffer_duration_spin = QSpinBox()
@@ -741,6 +751,24 @@ class DAQConfigPanel(QWidget):
                     color: #666666;
                 }
             """)
+
+    def get_downsample_threshold(self) -> int:
+        """
+        Get current downsample threshold.
+
+        Returns:
+            Current downsample threshold value
+        """
+        return self.downsample_spin.value()
+
+    def set_downsample_threshold(self, threshold: int):
+        """
+        Set downsample threshold.
+
+        Args:
+            threshold: Downsample threshold value (100-10000)
+        """
+        self.downsample_spin.setValue(threshold)
 
 
 # Example usage

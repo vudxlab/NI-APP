@@ -195,6 +195,20 @@ class RealtimePlotWidget(QWidget):
 
         return controls_layout
 
+    def set_downsample_threshold(self, threshold: int):
+        """
+        Set the downsample threshold for plot display.
+
+        Args:
+            threshold: Maximum number of points to display before downsampling
+        """
+        if threshold < 100 or threshold > 10000:
+            print(f"Warning: Invalid downsample threshold {threshold}, using default 1000")
+            threshold = 1000
+
+        self.downsample_threshold = threshold
+        print(f"Downsample threshold updated to: {threshold}")
+
     def configure(
         self,
         n_channels: int,
@@ -279,7 +293,9 @@ class RealtimePlotWidget(QWidget):
                 "title": y_title,
                 "showgrid": True,
                 "gridcolor": "#e0e0e0",
-                "zeroline": False,
+                "zeroline": True,
+                "zerolinecolor": "#666",
+                "zerolinewidth": 1.5,
                 "automargin": True
             }
         }
@@ -490,6 +506,16 @@ class RealtimePlotWidget(QWidget):
             x_title="Time (s)",
             show_legend=True
         )
+
+        # Calculate symmetric y-axis range to keep zero line in the middle
+        if self.auto_scale and traces:
+            y_max = max(np.max(np.abs(data[i, :])) for i in range(self.n_channels)
+                       if i < len(self.channel_visible) and self.channel_visible[i] and i < data.shape[0])
+            if y_max > 0:
+                margin = y_max * 0.1  # 10% margin
+                y_range = y_max + margin
+                layout["yaxis"]["range"] = [-y_range, y_range]
+
         self.plot_view_single.update_plot(traces, layout)
     
     def _update_stack_plots(self, time_axis: np.ndarray, data: np.ndarray, n_samples: int):
@@ -577,11 +603,21 @@ class RealtimePlotWidget(QWidget):
                     "title": f"{self.channel_units}",
                     "showgrid": True,
                     "gridcolor": "#e0e0e0",
-                    "zeroline": False,
+                    "zeroline": True,
+                    "zerolinecolor": "#666",
+                    "zerolinewidth": 1.5,
                     "automargin": True
                 },
                 "uirevision": f"channel_{i}"  # Keep zoom/pan state per channel
             }
+
+            # Calculate symmetric y-axis range to keep zero line in the middle
+            if self.auto_scale:
+                y_max = np.max(np.abs(y_vals))
+                if y_max > 0:
+                    margin = y_max * 0.1  # 10% margin
+                    y_range = y_max + margin
+                    layout["yaxis"]["range"] = [-y_range, y_range]
 
             # Update this specific PlotlyView
             self.plot_views_stack[i].update_plot([trace], layout)

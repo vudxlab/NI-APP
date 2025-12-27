@@ -207,7 +207,7 @@ class MainWindow(QMainWindow):
         self.daq_config_panel.stop_requested.connect(self._on_stop_acquisition)
         self.daq_config_panel.save_data_requested.connect(self._on_save_data_requested)
         self.config_tabs.addTab(self.daq_config_panel, "DAQ")
-        
+
         # Channel Configuration tab
         from .widgets.channel_config_widget import ChannelConfigWidget
         self.channel_config_widget = ChannelConfigWidget()
@@ -226,6 +226,11 @@ class MainWindow(QMainWindow):
 
         self.realtime_plot_widget = RealtimePlotWidget()
         realtime_layout.addWidget(self.realtime_plot_widget)
+
+        # Connect downsample threshold signal
+        self.daq_config_panel.downsample_threshold_changed.connect(
+            self.realtime_plot_widget.set_downsample_threshold
+        )
 
         # FFT plot tab
         from .widgets.fft_plot_widget import FFTPlotWidget
@@ -339,8 +344,10 @@ class MainWindow(QMainWindow):
 
             # Restore plot settings
             if self.realtime_plot_widget:
-                # Will be configured when acquisition starts
-                pass
+                # Load downsample threshold
+                downsample = settings.gui.realtime_downsample_threshold
+                self.daq_config_panel.set_downsample_threshold(downsample)
+                self.realtime_plot_widget.set_downsample_threshold(downsample)
 
             # Restore filter settings
             filter_config = {
@@ -402,6 +409,12 @@ class MainWindow(QMainWindow):
             settings.processing.filter_cutoff = filter_config.get('cutoff_low', 1000.0)
             settings.processing.filter_order = filter_config.get('order', 4)
             settings.processing.filter_enabled = filter_config.get('enabled', False)
+
+            # Save downsample threshold
+            if self.daq_config_panel:
+                settings.gui.realtime_downsample_threshold = (
+                    self.daq_config_panel.get_downsample_threshold()
+                )
 
             # Save to file
             self.config_manager.save_settings(settings)

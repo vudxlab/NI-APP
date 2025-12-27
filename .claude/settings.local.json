@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(if exist build rmdir /s /q build)",
+      "Bash(if exist dist rmdir /s /q dist)",
+      "Bash(cmd /c \"if exist build rmdir /s /q build\")",
+      "Bash(cmd /c \"if exist dist rmdir /s /q dist\")",
+      "Bash(pyinstaller:*)",
+      "Bash(.\\\\venv\\\\Scripts\\\\python.exe:*)",
+      "Bash(venv\\\\Scripts\\\\python.exe:*)",
+      "Bash(cmd /c:*)",
+      "Bash(python -m pip install:*)",
+      "Bash(python -c:*)",
+      "Bash(dir:*)",
+      "Bash(timeout /t 5 /nobreak)",
+      "Bash(ping:*)",
+      "Bash(python:*)",
+      "Bash(del test_downsample.py)",
+      "Bash(venv\\\\Scripts\\\\python.exe -m PyInstaller:*)"
+    ]
+  }
+}
